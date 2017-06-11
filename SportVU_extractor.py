@@ -6,55 +6,52 @@ class sport_digest(object):
 
     def __init__(self, path, gameID):
         self.ID = gameID
-        self.keep_col = ['Quarter', 'ShotClock', 'Position',
-       'rClock', 'Ballx', 'Bally', 'Height', 'Close', 'NearRim', 'RimStart', 'LowStart', 'HighStart']
+        self.keep_col = ['GameClock', 'Quarter', 'ShotClock', 'Position',
+       'Clock', 'BallX', 'BallY', 'BallZ', 'NearRim', 'RimStart', 'LowStart', 'HighStart']
         with open(path + self.ID) as json_data:
             self.data = json.load(json_data)
 
     def unpack(self):
-        e = self.data['events']
-        E = []
-        for event in e:
-            E += event['moments']
-        self.events = np.array(E)
+        events = self.data['events']
+        moments = []
+        cols1 = ['Quarter', 'EvID', 'GameClock', 'ShotClock', 'NoClue', 'Position']
+        for event in events:
+            moments += event['moments']
+        Moments = pd.DataFrame(moments, columns=cols1)
+        Moments['Clock'] = Moments['GameClock'].astype(int)
+        Moments['Quarter'] = Moments['Quarter'].astype(int)
 
-        self.Events = pd.DataFrame(self.events, columns = ['Quarter', 'EvID', 'GameClock', 'ShotClock', 'NoClue', 'Position'])
-        self.Events['rClock'] = self.Events['GameClock'].astype(int)
-        self.Events['Quarter'] = self.Events['Quarter'].astype(int)
+        ballMom = []
+        for moment in Moments['Position']:
+            ballMom.append(moment[0])
 
-        self.ball = np.array([event[0] for event in self.Events['Position']])
-        self.balldf = pd.DataFrame(self.ball, index = self.Events.index, columns=['Teamid','Playerid','Ballx','Bally','Height'])
-        self.balldf.Teamid = self.balldf.Teamid.astype(int).astype(str)
-        self.balldf.Playerid = self.balldf.Playerid.astype(int).astype(str)
-        self.balldf.Ballx = np.absolute(self.balldf['Ballx'].values - 47)
-        self.Positions = pd.concat([self.Events, self.balldf], axis = 1)
+        cols2 = ['TeamID', 'PlayerID', 'BallX', 'BallY', 'BallZ']
+        ballFrame = pd.DataFrame(ballMom, columns=cols2)
 
-        self.Positions.drop_duplicates(subset=['Quarter', 'GameClock', 'ShotClock','Ballx','Bally','Height'], inplace=True)
+        ballFrame['TeamID'] = ballFrame['TeamID'].astype(str)
+        ballFrame['PlayerID'] = ballFrame['PlayerID'].astype(str)
 
+        self.Positions = pd.concat([Moments, ballFrame], axis = 1)
+        self.Positions.drop_duplicates(subset=['Quarter', 'GameClock', 'ShotClock','BallX','BallY','BallZ'], inplace=True)
         self.Positions = self.Positions.sort_values(by=['Quarter', 'GameClock'], ascending=[True, False])
+        self.Positions = self.Positions[self.Positions['TeamID'] == '-1']
         self.Positions.reset_index(inplace=True, drop=True)
         return self.Positions
 
     def feat_gen(self):
-        heights = self.Positions['Height'].values
-        pre = heights[:-1]
-        post = heights[1:]
-        lower = np.concatenate((np.array([False]), (pre > post)))
-        self.Positions['Lower'] = lower.astype(int)
-        self.Positions['High'] = (self.Positions['Height'] > 10).astype(int)
+        self.Positions['Lower'] = (self.Positions['BallZ'].shift() > self.Positions['BallZ']).astype(int)
+        newpos = self.Positions[['BallX', 'BallY']].values - np.array([47, 0])
+        newpos = np.absolute(newpos)
+        hdist = newpos - np.array([41.65, 25])
+        hdist = np.sqrt((hdist ** 2).sum(axis = 1))
+        self.Positions['NearRim'] = (hdist < 1).astype(int)
 
-        self.ball = self.Positions[['Ballx', 'Bally']].values
+        self.Positions['NearRim'] += (self.Positions['BallZ'] > 9.9).astype(int)
+        self.Positions['NearRim'] = (self.Positions['NearRim'] > 1).astype(int)
+        self.Positions['RimStart'] = ((self.Positions['NearRim'] == 1) & (self.Positions['NearRim'].shift() != 1)).astype(int)  * self.Positions['Clock']
+        self.Positions['LowStart'] = ((self.Positions['Lower'] == 1) & (self.Positions['Lower'].shift() != 1)).astype(int)  * self.Positions['Clock']
+        self.Positions['HighStart'] = ((self.Positions['Lower'] == 0) & (self.Positions['Lower'].shift() != 0)).astype(int)  * self.Positions['Clock']
 
-        hoop = np.absolute(self.ball - np.array([41.65, 25]))
-        hoop = (hoop ** 2).sum(axis = 1)
-        close = hoop < 1
-        
-        self.Positions['Close'] = close.astype(int)
-
-        self.Positions['NearRim'] = ((self.Positions['Close'] + self.Positions['High']) == 2).astype(int)
-        self.Positions['RimStart'] = ((self.Positions['NearRim'] == 1) & (self.Positions['NearRim'].shift() != 1)).astype(int)  * self.Positions['rClock']
-        self.Positions['LowStart'] = ((self.Positions['Lower'] == 1) & (self.Positions['Lower'].shift() != 1)).astype(int)  * self.Positions['rClock']
-        self.Positions['HighStart'] = ((self.Positions['Lower'] == 0) & (self.Positions['Lower'].shift() != 0)).astype(int)  * self.Positions['rClock']
         self.Positions = self.Positions[self.keep_col]
         self.Positions.reset_index(inplace = True, drop = True)
         return self.Positions
@@ -66,9 +63,9 @@ class sport_digest(object):
 if __name__ == '__main__':
     import time
     t = time.time()
-    path = './data/games/'
+    path = './'
     gameID = '0021500492.json'
     sportvu = sport_digest(path, gameID)
     sportvu.run()
-    print sportvu.Positions.head(10)
+    print sportvu.Positions.info()
     print 'Runtime: ' + str(time.time() - t) + ' seconds'

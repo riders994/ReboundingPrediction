@@ -14,6 +14,7 @@ class massunpack(object):
         self.gameDict = {}
         self.frames = []
     def run(self, size = 400):
+        self.Coos = {}
         self.runtime = time.time()
         if self.rand == -1:
             self.list = ['0021500492.json']
@@ -26,27 +27,33 @@ class massunpack(object):
             print 'Start unpacking {}'.format(game[:-5])
             t = time.time()
             coo = coordinator.Coordination(game, self.path)
-            coo.run()
-            self.gameDict[game[:-5]] = coo.rowDict
             try:
+                coo.run()
+                self.gameDict[game[:-5]] = coo.rowDict
                 self.frames.append(coo.gameFrame)
+                coo.gameFrame.to_csv(self.pbpID +'.csv')
+                print "{} has finished unpacking in {} seconds.".format(coo.pbpID, str(time.time() - t))
             except Exception:
                 pass
-            self.FinalFrame = pd.concat(self.frames, ignore_index = True)
-            print "{} has finished unpacking in {} seconds.".format(coo.pbpID, str(time.time() - t))
-        pickle.dump((self.gameDict, self.FinalFrame), open('gameinfo.pkl', 'wb'))
+            # pickle.dump(coo, open('/media/nymy2/Data/Pickles/' + game + '.pkl', 'wb'))
+
+            # self.Coos[game] = coo
+            # print "{} has finished unpacking in {} seconds.".format(coo.pbpID, str(time.time() - t))
+        self.FinalFrame = pd.concat(self.frames, ignore_index = True)
+
         self.run = time.time()
         self.rt = int(self.run - self.runtime)
 
         print 'Job took {} hours, {} minutes, and {} seconds.'.format(self.rt/3600, (self.rt/60)%60, self.rt%3600)
     def write(self):
-        self.FinalFrame.to_csv('big_ass_frame.csv')
 
+        self.FinalFrame.to_csv('big_ass_frame.csv')
+        pickle.dump(self.gameDict, open('gameinfo.pkl', 'wb'))
 if __name__ == '__main__':
     # r = time.time()
     path = './data/games/'
     start = massunpack(path, rand = 1)
-    start.run()
+    start.run(400)
     # t = time.time()
     # rt = int(t - r)
     # print 'Job took {} hours, {} minutes, and {} seconds.'.format(rt/3600, (rt%60)/60, rt%3600)

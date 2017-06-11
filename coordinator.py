@@ -5,58 +5,53 @@ from SportVU_extractor import sport_digest
 import time
 
 def findRim(df, t, q):
-    rowSearch = df[((df['RimStart'] >= t) & (df['Quarter'] == q))]
-    times = np.where(rowSearch['RimStart'] >= t)[0]
-    if rowSearch.shape[0]:
-        row = rowSearch.iloc[times.max(),]
-    else:
-        row = df[(df['rClock'] == t) & (df['Quarter'] == q)].index
-        if len(row):
-            return max(row), t
-        else:
-            return max(df.index), t
-    if row['rClock'] - t > 5:
-        return row.name, t
-    else:
-        return row.name, row['rClock']
+    selection = df[(df['Quarter'] == q) & (df['RimStart'] >= t)]
+    try:
+        return selection.iloc[-1]
+    except Exception:
+        return []
 
-def findShot(df, r, q):
-    rowSearch = df[df['Quarter'] == q].iloc[:r[0],]
-    times = np.where(rowSearch['HighStart'] >= r[1])[0]
-    if rowSearch.shape[0]:
-        if len(times):
-            row = rowSearch.iloc[times.max(),]
-        else:
-            return max(df.index), r[1]
+def rimErr(df, t, q):
+    selection = df[(df['Quarter'] == q) & (df['Clock'] >= t)]
+    try:
+        return selection.iloc[-1]
+    except Exception:
+        return []
+
+def findShot(df, srs):
+    selection = df[(df['Quarter'] == srs['Quarter']) & (df['HighStart'] >= srs['Clock']) & (df['Loc'] < srs['Loc'])]
+    if selection.shape[0]:
+        try:
+            return selection.iloc[-1]
+        except Exception:
+            return []
     else:
-        row = df[(df['rClock'] == r[1]) & (df['Quarter'] == q)].index
-        if len(row):
-            return max(row), r[1]
-        else:
-            return max(df.index), r[1]
-    if row['rClock'] - r[1] > 5:
-        return row.name, r[1]
-    else:
-        return row.name, row['rClock']
+        return []
 
 
 def features(df):
     df['Off'] = df['TeamID'] == df['ShootTeamID']
     df.sort_values(by = ['TeamID', 'Off'], inplace = True)
     numcols = ['pre_PlayerX', 'pre_PlayerY', 'pre_HDist', 'pre_Angle', \
-               'post_PlayerX', 'post_PlayerY', 'post_HDist', 'post_Angle', 'pre_ShotClock', 'post_ShotClock']
-    shooter = df[df['PlayerID'] == df['ShootPlayerID'].astype(str)][numcols].values
-    nums = df[numcols].values
-    closer = ((df['pre_HDist'] < df['post_HDist']).astype(int) - 0.5) * 2
-    move = nums[:,[0,1]] - nums[:,[4,5]]
-    df['MoveV'] = np.sqrt((move ** 2).sum(axis = 1)) * closer
-    df['pre_CosSim'] = np.cos(nums[:,3] - shooter[:,3])
-    df['post_CosSim'] = np.cos(nums[:,7] - shooter[:,7])
-    df['DT'] = df['pre_ShotClock'] - df['post_ShotClock']
-    arrpre = df[['pre_PlayerX','pre_PlayerY']].values
-    arrpos = df[['post_PlayerX','post_PlayerY']].values
-    return df
+               'pos_PlayerX', 'pos_PlayerY', 'pos_HDist', 'pos_Angle', 'pre_GameClock', 'pos_GameClock']
+    shooter = df[df['PlayerID'] == df['ShootPlayerID']][numcols].values
+    if shooter.shape[0]:
+        nums = df[numcols].values
+        closer = ((df['pre_HDist'] < df['pos_HDist']).astype(int) - 0.5) * 2
+        move = nums[:,[0,1]] - nums[:,[4,5]]
+        df['MoveV'] = np.sqrt((move ** 2).sum(axis = 1)) * closer
 
+        df['pre_CosSim'] = np.cos(nums[:,3] - shooter[:,3])
+        df['pos_CosSim'] = np.cos(nums[:,7] - shooter[:,7])
+        df['DT'] = df['pre_GameClock'] - df['pos_GameClock']
+        arrpre = df[['pre_PlayerX','pre_PlayerY']].values
+        arrpos = df[['pos_PlayerX','pos_PlayerY']].values
+        df['pre_Box'] = boxgen(arrpre)
+        df['pos_Box'] = boxgen(arrpos)
+        df['Rebounder'] = df['PlayerID'] == df['RebPlayerID']
+        return df
+    else:
+        return []
 def boxgen(arr):
     from collections import Counter
     bdist = np.sqrt(((arr - np.array([5.35,25])) ** 2).sum(axis = 1)).reshape(10,1)
@@ -64,11 +59,11 @@ def boxgen(arr):
     arr1 = arr[:5, :]
     arr2 = arr[5:,:]
     dists = np.array([np.sqrt(((arr1[:,:2] - row)**2).sum(axis = 1)) for row in arr2[:,:2]])
-    o = np.argmin(dists, axis = 1)
-    d = np.argmin(dists, axis = 0)
-    obox = [np.sum(d == i) for i in xrange(5)]
+    d = np.argmin(dists, axis = 1)
+    o = np.argmin(dists, axis = 0)
     dbox = [np.sum(o == i) for i in xrange(5)]
-    boxes = np.array(obox + dbox)
+    obox = [np.sum(d == i) for i in xrange(5)]
+    boxes = np.array(dbox + obox)
     return boxes
 
 class Coordination(object):
@@ -89,63 +84,102 @@ class Coordination(object):
     def rimshots(self):
         paired = self.pbpEX.paired
         Positions = self.sportEX.Positions
-        rims = np.array([findRim(Positions, shot[1]['Clock'], shot[1]['Period']) for shot in paired.iterrows()])
-        # print rims
-        shots = np.array([findShot(Positions, rims[i], shot[1]['Period']) for i, shot in enumerate(paired.iterrows())])
-        rimRows = Positions.iloc[rims[:,0],]
-        rimRows.reset_index(inplace=True, drop=True)
-        shotRows = Positions.iloc[shots[:,0],]
-        shotRows.reset_index(inplace=True, drop=True)
-        keep_col = ['ShotClock', 'Position', 'rClock']
-        shotRows = shotRows[keep_col]
-        rimRows = rimRows[keep_col]
-        shotRows['ShotClock'] = shotRows['ShotClock'].astype(float)
-        rimRows['ShotClock'] = rimRows['ShotClock'].astype(float)
-        rimRows.columns = ['post_'+col for col in rimRows.columns]
-        shotRows.columns = ['pre_'+col for col in shotRows.columns]
-        srpair = pd.concat((shotRows, rimRows), axis=1)
-        self.PSPaired = pd.concat((paired, srpair), axis = 1)
-        self.PSPaired['IDNum'] = str(hash(time.time()))
+        Positions['Loc'] = Positions.index
+        rims = {}
+        prev = set()
+        for i, row in paired.iterrows():
+            t = row['Clock']
+            q = row['Period']
+            r = findRim(Positions, t, q)
+            if len(r):
+                    l = r['Loc'].astype(str)
+                    if l not in prev:
+                        rims[str(i)] = r
+                        prev.update([l])
+                    else:
+                        r = rimErr(Positions, t, q)
+                        rims[str(i)] = r
+
+        shots = {}
+        prev = set()
+        for key, value in rims.iteritems():
+            r = findShot(Positions, value)
+            if len(r):
+                l = r['Loc'].astype(str)
+                if l not in prev:
+                    shots[key] = r
+                    prev.update([l])
+
+        pnum = shots.keys()
+        pnum = np.array(pnum).astype(int)
+        pnum.sort()
+        pnum = np.array(pnum).astype(str)
+        rebs = [rims[shot] for shot in pnum]
+        ups = [shots[shot] for shot in pnum]
+        ShotDF = pd.DataFrame(ups, index = pnum)
+        RebDF = pd.DataFrame(rebs, index = pnum)
+        keep_col = ['GameClock', 'Quarter', 'Position']
+        ShotDF = ShotDF[keep_col]
+        ShotDF.columns = ['pre_' + col for col in keep_col]
+        RebDF = RebDF[keep_col]
+        RebDF.columns = ['pos_' + col for col in keep_col]
+        RebDF.head()
+        pnum = np.array(pnum).astype(int)
+        paired = paired.iloc[list(pnum),:]
+        snr = ShotDF.join(RebDF)
+        snr.reset_index(inplace=True, drop = True)
+        self.PSPaired = paired.join(snr)
+        arr = self.PSPaired[['GameID', 'RebPlayerID', 'ShootPlayerID','Period', 'Clock']].values
+        a = arr[:,0]
+        for i in xrange(1,5):
+            a += arr[:,i].astype(str)
+        self.PSPaired['IDNum'] = a
         self.PSPaired.drop_duplicates(subset = 'IDNum', inplace = True)
+        self.PSPaired.dropna(inplace=True)
+
+        self.PSPaired.reset_index(inplace = True, drop = True)
+
     def obConstructor(self):
         self.rowDict = {}
-        hoop = np.array([5.35, 25])
+        hoop = np.array([41.65, 25])
         cols = ['TeamID', 'PlayerID', 'PlayerX', 'PlayerY', 'PlayerZ']
         tostr = cols[:2]
         rowcols = ['Clock', 'Period', 'RebPlayerID', 'RebPlayerName', 'ShootPlayerID', \
-                   'ShootPlayerName', 'ShootTeamID', 'ShootTeamName', 'pre_ShotClock', \
-                   'pre_rClock', 'post_ShotClock', 'post_rClock', 'IDNum']
+                   'ShootPlayerName', 'ShootTeamID', 'ShootTeamName', \
+                   'pre_GameClock', 'pos_GameClock', 'IDNum']
         df = self.PSPaired
-        for ID in df['IDNum'].unique():
-            row = df[df['IDNum'] == ID]
-            dfs = [pd.DataFrame(np.array(row['pre_Position'].values[0]), columns=cols), pd.DataFrame(np.array(row['post_Position'].values[0]), columns=cols)]
+
+        df['Loc'] = df.index
+
+        for i, row in df.iterrows():
+            dfs = [pd.DataFrame(row['pre_Position'], columns=cols), pd.DataFrame(row['pos_Position'], columns=cols)]
             for frame in dfs:
-                frame['PlayerX'] = frame['PlayerX'] - 47
+                frame['PlayerX'] = np.absolute(frame['PlayerX'].values - 47)
                 diff = (frame[['PlayerX', 'PlayerY']].values - hoop)
                 frame['HDist'] = np.sqrt((diff ** 2).sum(axis = 1))
                 frame['Angle'] = np.arctan2(diff[:,0], diff[:,1])
                 frame.pop('PlayerZ')
                 for col in tostr:
-                    frame[col] = frame[col].astype(str).str[:-2]
+                    frame[col] = frame[col].astype(str)
+
             ucols = frame.columns.values[2:]
-            cols2 = [tostr + ['pre_' + col for col in ucols], tostr + ['post_' + col for col in ucols]]
+            cols2 = [tostr + ['pre_' + col for col in ucols], tostr + ['pos_' + col for col in ucols]]
             dfs[0].columns = cols2[0]
             dfs[1].columns = cols2[1]
             dfs[1].pop('TeamID')
             new = dfs[0].set_index('PlayerID').join(dfs[1].set_index('PlayerID'))
-            new.reset_index(inplace=True)
-            for col in rowcols:
-                new[col] = row[col].values.repeat(11)
-            new['ShotID'] = (row['IDNum'].values).repeat(11) + new['PlayerID'].values
-            try:
-                self.rowDict[ID] = features(new[new['PlayerID'] != '-1'])
-            except Exception:
-                pass
-        try:
-            self.gameFrame = pd.concat(self.rowDict.values(), ignore_index=True)
-        except Exception:
-            pass
-        return self.rowDict
+            new.reset_index(inplace=True, drop = False)
+            if new.shape[0] == 11:
+                for col in rowcols:
+                    new[col] = np.array(row[col]).repeat(11)
+                new['ShotID'] = np.array(row['IDNum']).repeat(11) + new['PlayerID']
+                struct = features(new[new['PlayerID'] != '-1'])
+                if len(struct):
+                    self.rowDict[i] = struct
+
+        self.gameFrame = pd.concat(self.rowDict.values(), ignore_index=True)
+        self.gameFrame.reset_index(inplace = True, drop = True)
+#         return self.rowDict
 
 
     def run(self):
@@ -157,14 +191,14 @@ class Coordination(object):
         # print 'rimshots done'
         self.obConstructor()
         # print 'constructor done'
-        pass
+        # pass
 
 if __name__ == '__main__':
-    import time
-    path = './data/games/'
-    gameID = '0021500492.json'
+    import time, os
+    import random
     t = time.time()
-    coo = Coordination(gameID, path)
+    path = './'
+    game = '0021500492.json'
+    coo = Coordination(game, path)
     coo.run()
-
     print 'Runtime: ' + str(time.time() - t) + ' seconds'
