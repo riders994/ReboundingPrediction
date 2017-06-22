@@ -16,6 +16,9 @@ class massunpack(object):
     def run(self, size = 400):
         self.Coos = {}
         self.runtime = time.time()
+        self.wins = 0
+        self.losses = 0
+        self.check =[]
         if self.rand == -1:
             self.list = ['0021500492.json']
         else:
@@ -30,10 +33,17 @@ class massunpack(object):
             try:
                 coo.run()
                 self.gameDict[game[:-5]] = coo.rowDict
+                print 'Shape of {} with a dict size of {}.'.format(coo.gameFrame.shape, len(coo.rowDict))
                 self.frames.append(coo.gameFrame)
-                coo.gameFrame.to_csv(self.pbpID +'.csv')
+                self.wins +=1
+                if not self.wins%100:
+                    print '{} games run.'.format(self.wins)
+                # coo.gameFrame.to_csv(self.pbpID +'.csv')
                 print "{} has finished unpacking in {} seconds.".format(coo.pbpID, str(time.time() - t))
             except Exception:
+                print "There was an error unpacking {}".format(coo.pbpID)
+                self.losses+=1
+                self.check.append(coo.pbpID)
                 pass
             # pickle.dump(coo, open('/media/nymy2/Data/Pickles/' + game + '.pkl', 'wb'))
 
@@ -44,11 +54,12 @@ class massunpack(object):
         self.run = time.time()
         self.rt = int(self.run - self.runtime)
 
-        print 'Job took {} hours, {} minutes, and {} seconds.'.format(self.rt/3600, (self.rt/60)%60, self.rt%3600)
+        # print 'Job took {} hours, {} minutes, and {} seconds.'.format(self.rt/3600, (self.rt/60)%60, self.rt%3600)
     def write(self):
 
         self.FinalFrame.to_csv('big_ass_frame.csv')
         pickle.dump(self.gameDict, open('gameinfo.pkl', 'wb'))
+
 if __name__ == '__main__':
     # r = time.time()
     path = './data/games/'
