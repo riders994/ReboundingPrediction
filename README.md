@@ -4,9 +4,11 @@
 
 ## Overview
 
-This project was inspired by a story about Dennis Rodman, who was one of the greatest rebounders in NBA history.
+This project was inspired by a story about Dennis Rodman, who was one of the greatest rebounders in NBA history. Isiah Thomas, who was Rodman's teammate during their back to back NBA Championships in 1990 and '91 recounted the following anecdote in a [2011 interview with the Detroit Free Press](http://www.businessinsider.com/dennis-rodman-basketball-genius-2014-3):
 
-QUOTE HERE
+>"We were standing in the lay-up line, warming up and shooting, and Rodman was standing back and watching everybody shoot. I said, ‘Hey, come on, you have to participate; everybody’s shooting lay-ups, you have to shoot lay-ups, too.’ And he said, ‘I’m just watching the rotations on the basketball.’ I said, ‘Excuse me?’ He said, ‘Like, when you shoot, your ball spins three times in the air. Joe’s sometimes has 3 1/2 or four times.’
+
+>"That’s how far Rodman had taken rebounding, to a totally different level, like off the charts. He knew the rotation of every person that shot on our team — if it spins sideways, where it would bounce, how often it would bounce left or right. He had rebounding down to a science, and I never heard anyone think or talk about rebounding and defense the way he could break it down.
 
 Since players like Rodman and, more recently, Tristan Thompson are able to study rebounding and derive useful information, I wanted to see what would happen when machine learning was applied. I modeled rebounds based solely on where people are on the court, and how they move, and was able to successfully identify a rebounder 85% of the time.
 
@@ -60,7 +62,7 @@ My model takes in how players are oriented on the floor while the shot is in the
 
 ## Results
 
-While the model was only able to predict an individual rebounder correctly a few times (10 out of 5000 in training set), when feeding in all 10 players' data for a shot, the player who has the highest predicted probability was correct 85% of the time. This shows that positioning is an incredibly important aspect of rebounding.
+While the model was only able to predict an individual rebounder correctly a few times (10 out of 5000 in training set), when feeding in all 10 players' data for a shot, the player who has the highest predicted probability was correct 86% of the time. This shows that positioning is an incredibly important aspect of rebounding.
 
 It was also interesting to look at the players who consistently out-performed the model, grabbing boards in situations they were predicted not to. The vast majority of them are known as "not great" players who are very good at a couple aspects of the game.
 
