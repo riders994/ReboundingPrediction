@@ -54,7 +54,7 @@ def features(df):
     """
     #2.0 Separates numeric columns for #math operations.
     """
-    numcols = ['pre_PlayerX', 'pre_PlayerY', 'pre_HDist', 'pre_Angle', \
+    numcols = ['pre_PlayerX', 'pre_PlayerY', 'pre_HDist', 'pre_Angle',
                'pos_PlayerX', 'pos_PlayerY', 'pos_HDist', 'pos_Angle', 'pre_GameClock', 'pos_GameClock']
     """
     #2.1 Separates out shooter specifically for comparison columns.
