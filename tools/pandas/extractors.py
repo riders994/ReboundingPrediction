@@ -38,15 +38,14 @@ class SportVu:
         """
         Unpacks the json file and formats it to the initial DataFrame.
         """
-        """
         #1.0 Grabs relevant data.
-        """
+
         events = self.data['events']
         moments = []
-        """
-        #2.0 Constructing first DataFrame of each 'moment'.
-             Position column retains list of all player positions at that moment.
-        """
+
+        # 2.0 Constructing first DataFrame of each 'moment'.
+        #     Position column retains list of all player positions at that moment.
+
         moment_cols = ['Quarter', 'EvID', 'GameClock', 'ShotClock', 'NoClue', 'Position']
         for i, event in enumerate(events):
             moments += event['moments']
@@ -58,10 +57,10 @@ class SportVu:
         moment_df = pd.DataFrame(moments, columns=moment_cols)
         moment_df['Clock'] = moment_df['GameClock'].astype(int)
         moment_df['Quarter'] = moment_df['Quarter'].astype(int)
-        """
-        #3.0 Construct DataFrame of ball positions to attach to Moments.
-             Ideally will find a way to reduce size.
-        """
+
+        # 3.0 Construct DataFrame of ball positions to attach to Moments.
+        #     Ideally will find a way to reduce size.
+
         ball_moment = []
         for moment in moment_df['Position']:
             ball_moment.append(moment[0])
@@ -70,39 +69,36 @@ class SportVu:
         balldf['TeamID'] = balldf['TeamID'].astype(str)
         balldf['PlayerID'] = balldf['PlayerID'].astype(str)
 
-        """
-        #4.0 Creates dictionary for player positions to be used when coordinating.
-        """
+
+        # 4.0 Creates dictionary for player positions to be used when coordinating.
+
         for player in (home['players'] + vis['players']):
             self.playerDict[str(player['playerid'])] = POSITION_MAP[player['position']]
 
-        """
-        #5.0 Creates final frame of Positions to be used in coordination script.
-        """
-        positions = pd.concat([moment_df, balldf], axis=1)
-        positions.drop_duplicates(subset=['Quarter', 'GameClock', 'ShotClock', 'BallX', 'BallY', 'BallZ'], inplace=True)
+
+        # 5.0 Creates final frame of Positions to be used in coordination script.
+
+        positions = pd.concat([moment_df, balldf], axis=1).drop_duplicates(subset=['Quarter', 'GameClock', 'ShotClock',
+                                                                                   'BallX', 'BallY', 'BallZ'])
         positions = positions.sort_values(by=['Quarter', 'GameClock'], ascending=[True, False])
-        positions = positions[positions['TeamID'] == '-1']
-        positions.reset_index(inplace=True, drop=True)
+        positions = positions[positions['TeamID'] == '-1'].reset_index(drop=True)
         self.results.update({self.current: self.feat_gen(positions)})
 
     def feat_gen(self, position_df):
         """
         Generates some base features that are used when coordinating.
-        """
-        """
+
         Identifies when the ball is approaching the rim, starting or
         starting to rise. This is used to identify when shtos and rebounds
         actually start.
         """
-        """
-        #1.0 Identify when ball is lower than in previous position.
-        """
+        # 1.0 Identify when ball is lower than in previous position.
+
         position_df['Lower'] = (position_df['BallZ'].shift() > position_df['BallZ']).astype(int)
-        """
-        #2.0 Changes the balls dimensions to half court. Not stored in final
-             DataFrame because ball x,y,z is not used.
-        """
+
+        # 2.0 Changes the balls dimensions to half court. Not stored in final
+        #     DataFrame because ball x,y,z is not used.
+
         newpos = position_df[['BallX', 'BallY']].values - np.array([47, 0])
         newpos = np.absolute(newpos)
         hdist = newpos - np.array([41.65, 25])  # Location of hoop
@@ -110,19 +106,21 @@ class SportVu:
         position_df['NearRim'] = (hdist < 1).astype(int)  # is the ball within a foot of the hoop?
         position_df['NearRim'] += (position_df['BallZ'] > 9.9).astype(int)  # is it also above (or almost) the rim?
         position_df['NearRim'] = (position_df['NearRim'] > 1).astype(int)
-        """
-        #3.0 Creates a time signature for when ball starts to be near rim,
-             starts going up, or starts going down.
-        """
-        position_df['RimStart'] = ((position_df['NearRim'] == 1) & (position_df['NearRim'].shift() != 1)).astype(int) *\
-                                  position_df['Clock']
-        position_df['LowStart'] = ((position_df['Lower'] == 1) & (position_df['Lower'].shift() != 1)).astype(int) *\
-                                  position_df['Clock']
-        position_df['HighStart'] = ((position_df['Lower'] == 0) & (position_df['Lower'].shift() != 0)).astype(int) * \
-                                   position_df['Clock']
 
-        position_df = position_df[self.keep_col]
-        position_df.reset_index(inplace=True, drop=True)
+        # 3.0 Creates a time signature for when ball starts to be near rim,
+        #     starts going up, or starts going down.
+
+        position_df['RimStart'] = (
+                                          (position_df['NearRim'] == 1) & (position_df['NearRim'].shift() != 1)
+                                  ).astype(int) * position_df['Clock']
+        position_df['LowStart'] = (
+                                          (position_df['Lower'] == 1) & (position_df['Lower'].shift() != 1)
+                                  ).astype(int) * position_df['Clock']
+        position_df['HighStart'] = (
+                                           (position_df['Lower'] == 0) & (position_df['Lower'].shift() != 0)
+                                   ).astype(int) * position_df['Clock']
+
+        position_df = position_df[self.keep_col].reset_index(drop=True)
         return position_df
 
     def run(self, game_id=None):
@@ -159,8 +157,7 @@ class PlayByPlay:
         })
         paired['ShootTeamID'] = paired['ShootTeamID'].str[:-2]
         paired['RebTeamID'] = paired['RebTeamID'].str[:-2]
-        paired.reset_index(inplace=True, drop=True)
-        return paired
+        return paired.reset_index(drop=True)
 
     def unpack(self, playbyplay, game_id):
         """
@@ -175,9 +172,9 @@ class PlayByPlay:
         #1.1 Sets columns to keep, and columns to reformat.
         """
         keepers = [
-            'EVENTMSGTYPE', 'PERIOD', 'PCTIMESTRING', 'HOMEDESCRIPTION', 'PLAYER1_ID', 'PLAYER1_NAME', 'PLAYER1_TEAM_ID'
-            , 'PLAYER1_TEAM_ABBREVIATION', 'PLAYER2_ID', 'PLAYER2_NAME', 'PLAYER2_TEAM_ID', 'PLAYER2_TEAM_ABBREVIATION',
-            'PLAYER3_ID', 'PLAYER3_NAME', 'PLAYER3_TEAM_ID', 'PLAYER3_TEAM_ABBREVIATION'
+            'EVENTMSGTYPE', 'PERIOD', 'PCTIMESTRING', 'HOMEDESCRIPTION', 'PLAYER1_ID', 'PLAYER1_NAME',
+            'PLAYER1_TEAM_ID', 'PLAYER1_TEAM_ABBREVIATION', 'PLAYER2_ID', 'PLAYER2_NAME', 'PLAYER2_TEAM_ID',
+            'PLAYER2_TEAM_ABBREVIATION', 'PLAYER3_ID', 'PLAYER3_NAME', 'PLAYER3_TEAM_ID', 'PLAYER3_TEAM_ABBREVIATION'
         ]
         str_cols = [
             'PCTIMESTRING', 'HOMEDESCRIPTION', 'PLAYER1_ID', 'PLAYER1_NAME', 'PLAYER1_TEAM_ID',
@@ -210,22 +207,20 @@ class PlayByPlay:
         #2.2 Adds clock column and orders.
         """
         playbyplay['GameClock'] = playbyplay['PCTIMESTRING'].apply(clocker)
-        playbyplay.sort_values(by=['PERIOD', 'GameClock'], ascending=[True, False], inplace=True)
+        playbyplay.sort_values(by=['PERIOD', 'GameClock'], ascending=[True, False])
 
         """
         #2.3 Separates the correct rows into new frames.
         """
-        shots = playbyplay.iloc[shots, :]
-        rebs = playbyplay.iloc[rebs, :]
-        shots.reset_index(inplace=True, drop=True)
-        rebs.reset_index(inplace=True, drop=True)
+        shots = (playbyplay.iloc[shots, :]).reset_index(drop=True)
+        rebs = (playbyplay.iloc[rebs, :]).reset_index(drop=True)
         paired = self.pairer(shots, rebs, game_id)
         return paired
 
     @staticmethod
     def _get_pbp(game_id):
         """
-        Queries STATS server for game data.
+        Queries NBA server for game data.
         """
         if not game_id:
             raise ValueError
@@ -236,7 +231,6 @@ class PlayByPlay:
     def run(self, game_id):
         pbp = self._get_pbp(game_id)
         self.results.update({game_id: self.unpack(pbp, game_id)})
-
 
 
 if __name__ == '__main__':

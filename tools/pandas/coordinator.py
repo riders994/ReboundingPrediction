@@ -45,25 +45,24 @@ def features(df):
     """
     More complicated feature engineering, last step in the processing of each shot.
     """
-    """
-    #1.0 Sets offense and defnse, then sorts.
-    """
+
+    # 1.0 Sets offense and defnse, then sorts.
     df['Off'] = df['TeamID'] == df['ShootTeamID']
-    df.sort_values(by='Off', inplace=True)
-    """
-    #2.0 Separates numeric columns for #math operations.
-    """
+    df = df.sort_values(by='Off')
+
+    # 2.0 Separates numeric columns for #math operations.
+
     numcols = ['pre_PlayerX', 'pre_PlayerY', 'pre_HDist', 'pre_Angle',
                'pos_PlayerX', 'pos_PlayerY', 'pos_HDist', 'pos_Angle', 'pre_GameClock', 'pos_GameClock']
-    """
-    #2.1 Separates out shooter specifically for comparison columns.
-    """
+
+    # 2.1 Separates out shooter specifically for comparison columns.
+
     shooter = df[df['PlayerID'] == df['ShootPlayerID']][numcols].values
     if shooter.shape[0]:  # removes erroneously identified shots
-        """
-        #3.0 Computes various numeric stats including how they move, their
-             cosine similarity to the shooter, and also how they are boxing out.
-        """
+
+        # 3.0 Computes various numeric stats including how they move, their
+        #     cosine similarity to the shooter, and also how they are boxing out.
+
         nums = df[numcols].values
         closer = ((df['pre_HDist'] < df['pos_HDist']).astype(int) - 0.5) * 2
         move = nums[:, [0, 1]] - nums[:, [4, 5]]
@@ -105,20 +104,22 @@ def boxgen(arr):
     boxes = np.array(dbox + obox)
     return boxes
 
+
 def rimshots(sportvu, pbp):
     """
     Uses clock from Play by Play to identify when the ball hits the rim, and
     then uses that as a reference point to search back and find when the
     shot started.
     """
-    sportvu['Loc'] = sportvu.index #isolate for consistency, avoids problems with .iloc and indexing
+    sportvu['Loc'] = sportvu.index # isolate for consistency, avoids problems with .iloc and indexing
     rims = {}
-    prev = set() #avoids repeats
+    prev = set() # avoids repeats
     for i, row in pbp.iterrows():
         t = row['Clock']
         q = row['Period']
         r = find_rim(sportvu, t, q)
-        if len(r): #makes sure shot is findable, due to problems with game clock
+        # makes sure shot is findable, due to problems with game clock
+        if len(r):
                 l = r['Loc'].astype(str)
                 if l not in prev:
                     rims[str(i)] = r
@@ -131,7 +132,8 @@ def rimshots(sportvu, pbp):
     prev = set()
     for key, value in rims.iteritems():
         r = find_shot(sportvu, value)
-        if len(r): #same as above, game log will sometimes be incomplete.
+        # same as above, game log will sometimes be incomplete.
+        if len(r):
             l = r['Loc'].astype(str)
             if l not in prev:
                 shots[key] = r
@@ -143,31 +145,28 @@ def rimshots(sportvu, pbp):
     pnum = np.array(pnum).astype(str)
     rebs = [rims[shot] for shot in pnum]
     ups = [shots[shot] for shot in pnum]
-    ShotDF = pd.DataFrame(ups, index = pnum)
-    RebDF = pd.DataFrame(rebs, index = pnum)
+    shot_df = pd.DataFrame(ups, index=pnum)
+    reb_df = pd.DataFrame(rebs, index=pnum)
     keep_col = ['GameClock', 'Quarter', 'Position']
-    ShotDF = ShotDF[keep_col]
-    """
-    Creates separate pre/post labeling
-    """
-    ShotDF.columns = ['pre_' + col for col in keep_col]
-    RebDF = RebDF[keep_col]
-    RebDF.columns = ['pos_' + col for col in keep_col]
-    RebDF.head()
+    shot_df = shot_df[keep_col]
+
+    # Creates separate pre/post labeling
+
+    shot_df.columns = ['pre_' + col for col in keep_col]
+    reb_df = reb_df[keep_col]
+    reb_df.columns = ['pos_' + col for col in keep_col]
+    reb_df.head()
     pnum = np.array(pnum).astype(int)
-    pbp = pbp.iloc[list(pnum),:]
-    snr = ShotDF.join(RebDF)
-    snr.reset_index(inplace=True, drop = True)
-    # pbp = pbp.join(snr)
-    arr = # pbp[['GameID', 'RebPlayerID', 'ShootPlayerID','Period', 'Clock']].values
+    pbp = pbp.iloc[list(pnum), :]
+    snr = shot_df.join(reb_df).reset_index(drop=True)
+    pbp = pbp.join(snr)
+    arr = pbp[['GameID', 'RebPlayerID', 'ShootPlayerID', 'Period', 'Clock']].values
     a = arr[:, 0]
     for i in range(1, 5):
         a += arr[:, i].astype(str)
-    # pbp['IDNum'] = a
-    # pbp.drop_duplicates(subset='IDNum', inplace=True)
-    # pbp.dropna(inplace=True)
-
-    # pbp.reset_index(inplace=True, drop=True)
+    pbp['IDNum'] = a
+    pbp = pbp.drop_duplicates(subset='IDNum').dropna().reset_index(drop=True)
+    return pbp
 
 
 class Coordinator:
