@@ -39,6 +39,21 @@ def _build(args: argparse.Namespace) -> int:
     return 0 if report.n_succeeded else 1
 
 
+def _baseline(args: argparse.Namespace) -> int:
+    """Fit the baseline ladder in each feature regime and print the comparison."""
+    from rebounding.eval import baseline
+
+    if not Path(args.frame).exists():
+        print(f"no frame at {args.frame}; run `build --out {args.frame}` first", file=sys.stderr)
+        return 1
+
+    results, split = baseline.run(args.frame, l2=args.l2, with_forest=args.forest)
+    print(split.summary())
+    print()
+    print(baseline.format_results(results))
+    return 0
+
+
 def _inspect(args: argparse.Namespace) -> int:
     """Tracking-side summary for one game. No play-by-play, so no network."""
     tracking = sportvu.load(args.game)
@@ -69,6 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     build_cmd.add_argument("--limit", type=int, default=None, help="only the first N games")
     build_cmd.set_defaults(func=_build)
+
+    baseline_cmd = sub.add_parser("baseline", help="fit the baseline ladder and report accuracy")
+    baseline_cmd.add_argument("--frame", default="data/frame.parquet", help="parquet from `build`")
+    baseline_cmd.add_argument("--l2", type=float, default=1.0, help="L2 penalty on the logit weights")
+    baseline_cmd.add_argument(
+        "--forest", action="store_true", help="also fit a random forest (needs the 'models' extra)"
+    )
+    baseline_cmd.set_defaults(func=_baseline)
 
     inspect_cmd = sub.add_parser("inspect", help="tracking-only summary for one game")
     inspect_cmd.add_argument("--game", required=True)

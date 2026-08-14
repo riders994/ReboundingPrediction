@@ -54,6 +54,32 @@ PLAYER_FEATURES = [
     "is_offense", "is_shooter", "role",
 ]
 
+# Identity features, true at both moments and usable in either regime below.
+_STATIC_FEATURES = ["is_offense", "is_shooter", "role"]
+
+# Everything knowable when the ball leaves the shooter's hand. This is what the web
+# app can actually supply, because a user places players once and presses go.
+RELEASE_FEATURES = [
+    "pre_x", "pre_y", "pre_dist", "pre_angle", "pre_vx", "pre_vy", "pre_speed",
+    "pre_cos_shooter", "pre_box", *_STATIC_FEATURES,
+]
+
+# Everything knowable once the ball reaches the rim, including how each player moved
+# to get there. Training on these measures the ceiling, not a servable model: at
+# prediction time these positions do not exist yet and would have to be forecast.
+# The 2017 work reported 86% top-1 from this regime while serving predicted inputs,
+# which is the train/serve skew the two regimes exist to quantify.
+RIM_FEATURES = [
+    "pos_x", "pos_y", "pos_dist", "pos_angle", "pos_cos_shooter", "pos_box",
+    "move_dx", "move_dy", "move_dist", "closed_on_rim", *_STATIC_FEATURES,
+]
+
+FEATURE_REGIMES = {
+    "release": RELEASE_FEATURES,
+    "rim": RIM_FEATURES,
+    "all": PLAYER_FEATURES,
+}
+
 
 def boxgen(xy: np.ndarray) -> np.ndarray:
     """Crude box-out counts: how many opponents each player is nearest to.

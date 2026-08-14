@@ -145,12 +145,53 @@ movement model underperformed.
 
 ## Modelling
 
-*Being rebuilt. What follows describes the 2017 work and what replaces it.*
+### Baseline results
+
+`python -m rebounding.cli baseline --forest`, on a chronological game-level split
+(441 train / 95 val / 95 test games), team rebounds excluded, scored per shot as
+top-1 of ten players. Validation split:
+
+| regime | slot prior | nearest to rim | conditional logit | random forest |
+|---|---|---|---|---|
+| **release** | 23.1% | 22.8% | 26.2% | **27.6%** |
+| **rim** | 23.1% | 31.7% | 32.8% | **35.8%** |
+| all | 23.1% | 31.7% | 33.6% | **36.7%** |
+
+Two things fall out of this.
+
+**The train/serve gap is 8.2 points** (35.8% at rim time vs 27.6% at release, best
+model in each). That is the entire budget a movement model has to earn back, and it
+is smaller than the rebuild plan assumed. A perfect movement model — one that
+predicts rim-time positions exactly — buys 8 points of top-1. That reframes the
+scene-level CVAE from *the* blocking problem to one option among several, and makes
+"improve the rebounder model on release-time features" the competing use of the same
+effort.
+
+**The 2017 figure of 86% top-1 does not survive contact.** Reproducing that model
+family and scoring it three ways on the same data:
+
+| metric | value |
+|---|---|
+| per-shot top-1 | 35.8% |
+| per-row binary accuracy | 90.1% |
+| per-row accuracy, predicting "nobody" for all ten | 90.0% |
+| per-row AUC | 0.829 |
+
+86% is not reachable as top-1 from these features, sits *below* the 90% that
+predicting "nobody rebounds" scores by construction, and lands close to the 0.829
+per-row AUC. The most likely reading is that it was a per-row metric — AUC or
+accuracy over the ten-times-longer row table — rather than the per-shot question the
+app actually asks. The 2017 code is gone, so this can't be confirmed directly; the
+weights survive only in the web app repo. Treated as a per-row number it is
+unremarkable, and nothing in the current data supports quoting 86% as top-1.
+
+*What follows describes the 2017 work and what replaces it.*
 
 Two models, chained. The **rebounder model** predicts who gets the board from where
-everyone stands when the ball reaches the rim; a random forest reached 86% top-1.
-The **movement model** exists because the web app can only ask a user for positions
-at *release*, so something has to predict where players will be a second later.
+everyone stands when the ball reaches the rim; a random forest was reported at 86%
+top-1, which the section above shows was almost certainly a per-row metric. The
+**movement model** exists because the web app can only ask a user for positions at
+*release*, so something has to predict where players will be a second later.
 
 The movement model never worked well. It was a Keras dense net doing deterministic
 point regression from one snapshot to another, one row per player. Three problems:
@@ -161,9 +202,9 @@ box-outs were unrepresentable.
 
 There is also a train/serve skew that no amount of movement-model quality fixes: the
 rebounder was trained and evaluated on ground-truth rim-time positions but served
-predicted ones, so 86% is a ceiling the live app never saw. The honest headline
-number is top-1 accuracy **from release-time inputs**, with 86% quoted as the
-ceiling and the gap stated.
+predicted ones. That skew is now measured rather than argued about — 8.2 points of
+top-1 — and the honest headline number is accuracy **from release-time inputs**,
+currently 27.6%.
 
 The rebuild plan: a scene-level conditional VAE with a set-transformer encoder for
 movement, sampling coherent futures rather than one averaged guess; and a grouped
