@@ -144,8 +144,13 @@ self.pos['newx'] = self.posArr[:,1]     # <- newx gets column 1
 `x`/`y` feed the model; `newx`/`newy` are what `Modeling()` returns and what the
 browser draws. They are assigned from opposite columns. **The predicted positions
 drawn on screen are transposed relative to the ones the prediction was computed
-from.** This is the most user-visible bug in the app: the dots are in the wrong
-places, and it would look like a bad model rather than a bad index.
+from.**
+
+This is the most damaging bug in the app, because the drawn movement is the product
+(§5) — not a debug overlay. Whatever the movement model's real quality, the user has
+never seen it: they have been watching its output reflected about the line `x = y`.
+Any judgement anyone has formed about how good the movement predictions look is
+based on transposed coordinates. Fix this before evaluating `posnn.h5` at all.
 
 ### 3.5 There is no court folding at all — **needs checking**
 
@@ -218,31 +223,59 @@ top-1, phrased as "picks the right rebounder about 1 time in 4".
 
 ## 5. What the app should serve instead
 
-### The architecture can get simpler
+### The movement model stays — it is a product feature, not an accuracy device
 
-Today the app chains two models: `posnn.h5` predicts where players will be when the
-ball arrives, then the rebounder model runs on those predicted positions. That chain
-is the source of the app's worst behaviour — the movement model is an L2 regression
-onto a multimodal target, so it returns the conditional mean and drifts every player
-toward the paint, with no term preventing two predicted players from occupying the
-same spot.
+The app's whole interaction is: place ten players at release, press Run, watch what
+happens. The predicted movement **is** the thing being shown. So `posnn.h5` (or its
+replacement) is required regardless of what it does for accuracy, and the Keras
+dependency stays in the stack either way.
 
-**That chain is now known to be worth 8.2 points of top-1.** Measured on the rebuilt
-corpus:
+That reframes it rather than removing it. Two decisions that look like one:
+
+**Decision A — what the rebounder consumes.** Independent of the visual. Measured on
+the rebuilt corpus:
 
 | regime | best top-1 | meaning |
 |---|---|---|
-| release-time features only | 27.6% | what a user can actually supply |
+| release-time features only | 27.6% | what a user supplies directly |
 | rim-time features | 35.8% | ceiling; requires knowing the future |
 
-A *perfect* movement model buys 8.2 points. The current one is far from perfect and
-demonstrably biased. **Recommendation: drop the movement model for v1** and serve a
-single model trained directly on release-time features. That removes Keras, `posnn.h5`,
-`msd.pkl`, and every bug in §3.3 and §3.4 from the stack, at a cost that is bounded
-above by 8 points and is probably negative in practice.
+A *perfect* movement model buys 8.2 points. The current one is biased in a known
+direction, so feeding its output to the rebounder plausibly scores *below* the 27.6%
+that ignoring it entirely gets. **Recommendation: run the rebounder on release-time
+features**, and let the movement model drive the animation beside it rather than
+upstream of it. If a later movement model measurably beats release-time features on
+held-out data, move it back into the path then — that is a one-line swap, and §7 step 4
+is where to test it.
 
-If the app wants to keep showing predicted movement as a *visual*, it can — but it
-should not be in the prediction path.
+**Decision B — the quality bar for the movement model.** This is where it gets more
+demanding, not less. As a hidden intermediate, a mediocre movement model costs a few
+points of an already-imperfect metric. As the visible output, its failure modes are
+things a user watches happen:
+
+- **L2 on a multimodal target returns the conditional mean.** A player who might crash
+  the offensive glass or might leak out in transition gets drawn splitting the
+  difference — drifting toward the paint, which is where the average of those two
+  futures lies. Every player drifting paint-ward is immediately legible as wrong to
+  anyone who has watched basketball.
+- **No interaction term.** Nothing stops two predicted players occupying the same
+  square foot. Overlapping dots read as a broken app, and box-outs — the thing the
+  model is supposed to illustrate — are literally unrepresentable.
+
+So the scene-level conditional VAE in the rebuild plan is motivated by **the UI**, not
+by the 8.2 points. It samples coherent whole-scene futures instead of averaging them,
+which is exactly what a visual needs.
+
+It also unlocks something the current model cannot do: sampling several futures and
+drawing the *spread* — a cloud or a set of ghosts per player — is more honest than one
+confident dot, and communicates uncertainty a coach would want to see. A generative
+model gives that for free; a point regression cannot express it at all.
+
+**Evaluate it accordingly.** Do not tune the movement model on L2 error — that metric
+is what produces the drift. Judge it on whether real rim-time positions fall inside the
+predicted distribution (calibration), and on whether sampled scenes are physically
+plausible: no overlapping players, speeds within human range, box-out relationships
+preserved.
 
 ### The feature contract
 
@@ -294,19 +327,25 @@ wanted. See `rebounding/models/conditional_logit.py`.
 
 ## 7. Suggested order
 
-1. **Retrain and commit a model.** Nothing else can be tested until the app has
+1. **Retrain and commit a rebounder.** Nothing else can be tested until the app has
    weights. Use the release-time regime; remove `*.pkl` from `.gitignore` or use Git
    LFS, or the same loss happens again.
 2. **Rewrite `webapp.py` for Python 3** around the explicit feature contract in §5.
    Delete `features()` and `boxgen()` from the app and import the pipeline's versions
    so there is exactly one definition of every feature.
-3. **Fix §3.4** (the transposed render) — it is one line and the most visible defect.
-4. **Confirm the coordinate frame** (§3.5) with a known-position round trip before
-   trusting any number the app produces.
-5. **Correct the accuracy copy** (§4).
-6. **Deploy under gunicorn** (§6).
+3. **Fix §3.4** (the transposed render) — one line, and it gates step 4.
+4. **Look at `posnn.h5` honestly, for the first time.** With the transpose fixed and
+   the coordinate frame confirmed, run some real plays through it and watch. It may be
+   adequate as a visual, or the paint-drift may be obvious on sight. That observation
+   decides whether the CVAE rebuild is urgent or can wait — and it is unavailable until
+   step 3 lands.
+5. **Confirm the coordinate frame** (§3.5) with a known-position round trip before
+   trusting any number or any drawn position the app produces.
+6. **Correct the accuracy copy** (§4).
+7. **Deploy under gunicorn** (§6).
 
-Steps 1 and 2 make the app runnable; 3 and 4 make it correct; 5 makes it honest.
+Steps 1–2 make the app runnable; 3 and 5 make it correct; 4 tells you how much
+modelling work is actually left; 6 makes it honest.
 
 ---
 
