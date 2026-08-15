@@ -289,11 +289,20 @@ pre_cos_shooter, pre_box, is_offense, is_shooter, role
 
 Notes for the serving side:
 
-- `pre_vx`, `pre_vy`, `pre_speed` are velocity at release. **The app has no velocity** —
-  a user places static dots. Either extend the UI to let a user drag a direction
-  vector, or train the served model on the subset without velocity and accept the
-  loss. Do not pass zeros for velocity to a model trained with real ones; that is
-  another train/serve skew. Measure the no-velocity variant before choosing.
+- `pre_vx`, `pre_vy`, `pre_speed` are velocity at release, and **the app has no
+  velocity** — a user places static dots. This is now measured, so the decision is
+  made: **train and serve the no-velocity variant, and leave the UI alone.**
+
+  | feature set | conditional logit | random forest |
+  |---|---|---|
+  | release, with velocity | 26.2% | 27.6% |
+  | release, no velocity | 26.4% | 26.5% |
+
+  Dropping the three velocity columns costs 1.1 points on the forest and nothing at
+  all on the logit. That is not worth asking a user to drag a direction vector for
+  each of ten players. Whatever else happens, **do not pass zeros for velocity to a
+  model trained with real ones** — that is train/serve skew, and strictly worse than
+  the honest no-velocity model.
 - `role` is an ordinal listed position from `constants.POSITION_MAP`, defaulting to
   `3.0` when unknown.
 - `pre_box` is the box-out count from `features.boxgen`, which asserts a `(10, 2)`
