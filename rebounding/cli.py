@@ -47,7 +47,13 @@ def _baseline(args: argparse.Namespace) -> int:
         print(f"no frame at {args.frame}; run `build --out {args.frame}` first", file=sys.stderr)
         return 1
 
-    results, split = baseline.run(args.frame, l2=args.l2, with_forest=args.forest)
+    results, split = baseline.run(
+        args.frame,
+        l2=args.l2,
+        with_forest=args.forest,
+        regimes=args.regimes.split(",") if args.regimes else None,
+        on=args.on,
+    )
     print(split.summary())
     print()
     print(baseline.format_results(results))
@@ -90,6 +96,17 @@ def main(argv: list[str] | None = None) -> int:
     baseline_cmd.add_argument("--l2", type=float, default=1.0, help="L2 penalty on the logit weights")
     baseline_cmd.add_argument(
         "--forest", action="store_true", help="also fit a random forest (needs the 'models' extra)"
+    )
+    baseline_cmd.add_argument(
+        "--regimes",
+        default=None,
+        help="comma-separated subset of release, release+derived, served, rim, all",
+    )
+    baseline_cmd.add_argument(
+        "--on",
+        default="val",
+        choices=["val", "test"],
+        help="which split to score on; test is for the final read, not for choosing",
     )
     baseline_cmd.set_defaults(func=_baseline)
 

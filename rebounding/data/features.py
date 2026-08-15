@@ -22,9 +22,12 @@ Notable changes:
   would not be reproducible when serving.
 * **Team rebounds are kept**, labelled via ``IsTeamRebound`` rather than dropped.
   The old ``features()`` returned ``[]`` whenever no individual rebounder matched.
-* **Velocity is included.** The old pipeline extracted two isolated frames and
-  never computed motion, which is the most likely single reason the movement model
-  underperformed.
+* **Velocity is included.** The old pipeline extracted two isolated frames and never
+  computed motion at all. It is worth 1.9 points of top-1 to the rebounder, which is
+  less than that omission was once assumed to cost -- see
+  :mod:`rebounding.data.derived` on how little of a player's next second his current
+  heading explains. The web app cannot supply one, so
+  :data:`SERVED_FEATURES` is the variant without it.
 * ``boxgen`` asserts its shape instead of silently producing wrong counts when a
   tracking glitch yields other than five players a side.
 """
@@ -36,6 +39,7 @@ import pandas as pd
 
 from rebounding.constants import HOOP
 from rebounding.data.court import fold, fold_vector, rim_angle, rim_distance
+from rebounding.data.derived import CONTEST_DERIVED, DERIVED_FEATURES, SHOT_DERIVED
 from rebounding.data.sportvu import GameTracking
 
 N_PLAYERS = 10
@@ -74,11 +78,34 @@ RIM_FEATURES = [
     "move_dx", "move_dy", "move_dist", "closed_on_rim", *_STATIC_FEATURES,
 ]
 
+# Release-time features that survive when nobody supplies a velocity. The web app
+# asks a user to place ten players and press go, and the handoff brief settled that
+# it will not also ask for ten direction vectors, so this is the set that can
+# actually be served. See :mod:`rebounding.data.derived`.
+_VELOCITY_COLUMNS = ("pre_vx", "pre_vy", "pre_speed")
+
+# What the app could serve before any of this: positions only, nothing derived.
+# Carried as its own regime so the derived features are measured against the set
+# they actually replace rather than against one that uses a velocity.
+STATIC_FEATURES = [f for f in RELEASE_FEATURES if f not in _VELOCITY_COLUMNS]
+
+SERVED_FEATURES = [*STATIC_FEATURES, *CONTEST_DERIVED, *SHOT_DERIVED]
+
+# Release plus everything derivable from it. Needs the frame to have been through
+# :meth:`rebounding.data.derived.ShotPriors.transform` first.
+RELEASE_DERIVED_FEATURES = [*RELEASE_FEATURES, *DERIVED_FEATURES]
+
 FEATURE_REGIMES = {
     "release": RELEASE_FEATURES,
+    "release+derived": RELEASE_DERIVED_FEATURES,
+    "static": STATIC_FEATURES,
+    "served": SERVED_FEATURES,
     "rim": RIM_FEATURES,
-    "all": PLAYER_FEATURES,
+    "all": [*PLAYER_FEATURES, *DERIVED_FEATURES],
 }
+
+# The regimes whose features exist without running the derived transform.
+BASE_REGIMES = ("release", "rim")
 
 
 def boxgen(xy: np.ndarray) -> np.ndarray:

@@ -212,12 +212,28 @@ per-row AUC. The most likely reading is that it was a per-row metric over the
 ten-times-longer row table, not a per-shot one. The 2017 code is gone, so this cannot
 be confirmed directly — state it as the reading the arithmetic supports.
 
-**The honest number for the app is top-1 from release-time inputs: 27.6%**, because
-release is all a user can supply. Against a 10-player field, chance is 10% and the
-positional prior alone is 23.1%.
+**The honest number for the app is top-1 from what a user can actually supply: 29.2%**
+on the held-out test split. Against a 10-player field, chance is 10% and the positional
+prior alone is 23.8%.
 
-If the UI displays a confidence or accuracy figure anywhere, it needs to become 27.6%
-top-1, phrased as "picks the right rebounder about 1 time in 4".
+That figure moved after this brief was first written. It was 27.6%, from a random
+forest on release-time features. Two changes since, both in the parent repo and
+neither requiring anything new from the UI:
+
+| step | test top-1 |
+|---|---|
+| positions only, per-row random forest (the old shape) | 26.7% |
+| positions only, grouped-softmax gradient boosting | 27.5% |
+| **+ relative and shot-context features (`rebounding/data/derived.py`)** | **29.2%** |
+
+The features are the larger half of that, and the important thing about them is that
+they are a **pure function of the ten dots the user already places** — who is inside
+whom, how far each player is from the rim relative to the other nine, where each stands
+relative to the shot. Nothing new is asked of the user; the serving code computes them
+from the same input it already has. §5 gives the list.
+
+If the UI displays a confidence or accuracy figure anywhere, it needs to become 29%
+top-1, phrased as "picks the right rebounder just under 3 times in 10".
 
 ---
 
@@ -233,15 +249,32 @@ dependency stays in the stack either way.
 That reframes it rather than removing it. Two decisions that look like one:
 
 **Decision A — what the rebounder consumes.** Independent of the visual. Measured on
-the rebuilt corpus:
+the rebuilt corpus, test split:
 
 | regime | best top-1 | meaning |
 |---|---|---|
-| release-time features only | 27.6% | what a user supplies directly |
-| rim-time features | 35.8% | ceiling; requires knowing the future |
+| what the app can supply, with derived features | 29.2% | ten static dots |
+| the same plus real release velocity | 31.1% | needs a UI the app does not have |
+| rim-time features | 36.3% | ceiling; requires knowing the future |
 
-A *perfect* movement model buys 8.2 points. The current one is biased in a known
-direction, so feeding its output to the rebounder plausibly scores *below* the 27.6%
+A *perfect* movement model buys **7.1 points** over what the app can serve today. That
+budget has shrunk twice — it was 8.2 points when this brief was written, then 5.3
+against the velocity-carrying variant — because the release-time model keeps
+improving while the ceiling barely moves. Every point added to the served model is a
+point subtracted from the movement model's justification.
+
+There is a second, blunter measurement pointing the same way. Over a shot's flight,
+players travel 7.67 ft on average. Extrapolating each player along his release velocity
+lands **8.46 ft** from the truth — *worse than assuming he never moves*, which lands
+8.41 ft away. Damping the step to the best-fitting 0.38 brings it to 6.49 ft. So
+release-time velocity is worth about four tenths of a second of NBA movement and
+nothing beyond that; a player's next second is dominated by an intention the velocity
+does not reveal. Anything that predicts rim-time positions well has to model that
+intention, which is the argument for a generative scene model rather than a kinematic
+one — and equally the reason a cheap version of it will not do.
+
+The current movement model is biased in a known
+direction, so feeding its output to the rebounder plausibly scores *below* the 29.2%
 that ignoring it entirely gets. **Recommendation: run the rebounder on release-time
 features**, and let the movement model drive the animation beside it rather than
 upstream of it. If a later movement model measurably beats release-time features on
@@ -263,7 +296,7 @@ things a user watches happen:
   model is supposed to illustrate — are literally unrepresentable.
 
 So the scene-level conditional VAE in the rebuild plan is motivated by **the UI**, not
-by the 8.2 points. It samples coherent whole-scene futures instead of averaging them,
+by the 7.1 points. It samples coherent whole-scene futures instead of averaging them,
 which is exactly what a visual needs.
 
 It also unlocks something the current model cannot do: sampling several futures and
@@ -279,27 +312,42 @@ preserved.
 
 ### The feature contract
 
-Train and serve exactly these, in this order. From
-`rebounding/data/features.py::RELEASE_FEATURES`:
+Train and serve exactly these, in this order. This is
+`rebounding/data/features.py::SERVED_FEATURES`, and the app should import that list
+rather than retype it:
 
 ```
-pre_x, pre_y, pre_dist, pre_angle, pre_vx, pre_vy, pre_speed,
-pre_cos_shooter, pre_box, is_offense, is_shooter, role
+pre_x, pre_y, pre_dist, pre_angle, pre_cos_shooter, pre_box,
+is_offense, is_shooter, role,                                    # positions
+d_nearest_opp, d_nearest_any, n_within_6, n_within_10,
+inside_gap, opp_boxes_me, n_opp_inside, n_team_inside,
+dist_minus_best, dist_minus_nearest_teammate, dist_minus_mean,
+closeness_share,                                                 # the contest
+flight_hat, shot_dist, rel_bearing, abs_rel_bearing,
+sin_shooter, dist_x_shot                                         # the shot
 ```
 
 Notes for the serving side:
 
-- `pre_vx`, `pre_vy`, `pre_speed` are velocity at release, and **the app has no
-  velocity** — a user places static dots. This is now measured, so the decision is
-  made: **train and serve the no-velocity variant, and leave the UI alone.**
+- **The eighteen derived columns need no new input.** Every one is computed from the
+  ten positions, which team is attacking, and who shot — the app has all three
+  already. Call `rebounding.data.derived.ShotPriors.transform` on the same frame the
+  first nine features come from. They are worth 1.7 points of top-1, which is more
+  than the model change was.
+- `flight_hat` is a *predicted* flight time, from a quadratic in shot distance fitted
+  on the training games and carried on the `ShotPriors` object. Do not substitute a
+  measured flight time — at serving time the shot has not landed yet, and the model
+  was trained on the prediction.
+- **Velocity is out, and that decision still holds.** `pre_vx`, `pre_vy`, `pre_speed`
+  are absent above because a user places static dots. Re-measured with the derived
+  features in place, on the test split:
 
-  | feature set | conditional logit | random forest |
-  |---|---|---|
-  | release, with velocity | 26.2% | 27.6% |
-  | release, no velocity | 26.4% | 26.5% |
+  | feature set | boosted softmax |
+  |---|---|
+  | with velocity | 31.1% |
+  | without (the list above) | 29.2% |
 
-  Dropping the three velocity columns costs 1.1 points on the forest and nothing at
-  all on the logit. That is not worth asking a user to drag a direction vector for
+  Roughly 1.9 points, still not worth asking a user to drag a direction vector for
   each of ten players. Whatever else happens, **do not pass zeros for velocity to a
   model trained with real ones** — that is train/serve skew, and strictly worse than
   the honest no-velocity model.
@@ -316,7 +364,11 @@ Notes for the serving side:
 The current app takes per-row random-forest probabilities and divides by their sum.
 The rebuilt model is a **grouped softmax over the ten players** — probabilities
 already sum to 1 across the shot by construction, and no renormalisation is needed or
-wanted. See `rebounding/models/conditional_logit.py`.
+wanted. The model to serve is `rebounding/models/boosted.py::BoostedSoftmax`, which is
+LightGBM under that same grouped loss;
+`rebounding/models/conditional_logit.py` is the linear version of the same thing and
+is the fallback if a LightGBM dependency is unwelcome in the serving image, at a cost
+of about 1.6 points.
 
 ---
 
@@ -337,7 +389,7 @@ wanted. See `rebounding/models/conditional_logit.py`.
 ## 7. Suggested order
 
 1. **Retrain and commit a rebounder.** Nothing else can be tested until the app has
-   weights. Use the release-time regime; remove `*.pkl` from `.gitignore` or use Git
+   weights. Use the `served` regime of §5; remove `*.pkl` from `.gitignore` or use Git
    LFS, or the same loss happens again.
 2. **Rewrite `webapp.py` for Python 3** around the explicit feature contract in §5.
    Delete `features()` and `boxgen()` from the app and import the pipeline's versions
@@ -363,9 +415,13 @@ modelling work is actually left; 6 makes it honest.
 | what | where |
 |---|---|
 | feature definitions, regimes, slot ordering | `rebounding/data/features.py` |
+| the served feature list | `rebounding/data/features.py::SERVED_FEATURES` |
+| relative and shot-context features, and the fitted priors | `rebounding/data/derived.py` |
 | court geometry, folding, `HOOP`, `rim_angle` | `rebounding/data/court.py`, `rebounding/constants.py` |
-| the grouped-softmax model | `rebounding/models/conditional_logit.py` |
+| the model to serve | `rebounding/models/boosted.py` |
+| its linear fallback | `rebounding/models/conditional_logit.py` |
 | baseline numbers reproduced | `python -m rebounding.cli baseline --forest` |
+| the same on the held-out test split | `python -m rebounding.cli baseline --on test` |
 | built training frame | `data/frame.parquet` (gitignored, rebuild with `cli build`) |
 
 One caveat worth carrying: the two data sources behind all of this now disagree on

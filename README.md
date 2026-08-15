@@ -25,7 +25,9 @@ how much of rebounding is just position and movement.
 The 2017 pipeline was Python 2 and no longer ran; the 2020 port on `rewrite-pd` was
 abandoned half-finished. The extraction pipeline has been rebuilt as the
 `rebounding` package on Python 3, with the correctness problems described below
-fixed and a test suite over a committed sample game.
+fixed and a test suite over a committed sample game. The rebounder model has been
+rebuilt on top of it: 29.2% top-1 from the inputs the web app can actually supply,
+against 26.7% for the model family it replaces.
 
 **The models are not in this repo.** The original `.gitignore` excluded `*.ip*` and
 `*.pkl`, so the notebooks and weights were never committed here. The movement model
@@ -81,7 +83,17 @@ rebounding/
     court.py          folding full court onto the attacking half
     pairing.py        locating each play-by-play shot in the tracking data
     features.py       per-shot, per-player features in canonical slot order
+    derived.py        relative and shot-context features, computed from the frame
     build.py          bulk build across games
+  models/
+    baselines.py      slot prior and nearest-to-rim, the floors
+    conditional_logit.py  grouped softmax over the ten players
+    boosted.py        the same loss with a tree ensemble for a score function
+    forest.py         per-row random forest, reproducing the 2017 shape
+  eval/
+    split.py          chronological game-level train/val/test
+    metrics.py        top-1, top-3, MRR, log loss
+    baseline.py       the ladder: every model in every feature regime
   cli.py
 ```
 
@@ -140,32 +152,64 @@ inside DataFrame cells.
 
 **Velocity was never computed at all.** The pipeline extracted two isolated frames
 per shot and nothing in between, so both models were being asked to reason about
-movement from a pair of still photographs. This is the most likely single reason the
-movement model underperformed.
+movement from a pair of still photographs.
+
+This was originally written down as the most likely single reason the movement model
+underperformed. That guess is now measured and it was too strong. Velocity is worth
+1.9 points of top-1 to the rebounder, and a player's release-time heading predicts his
+rim-time position only about four tenths of a second into the flight — extrapolating
+along it for the full flight is worse than assuming he never moves. Velocity was
+missing and is worth having, but its absence does not account for the movement model's
+behaviour; the L2 objective on a multimodal target does. See *Where the gains came
+from* below.
 
 ## Modelling
 
-### Baseline results
+### Results
 
-`python -m rebounding.cli baseline --forest`, on a chronological game-level split
-(441 train / 95 val / 95 test games), team rebounds excluded, scored per shot as
-top-1 of ten players. Validation split:
+`python -m rebounding.cli baseline --forest --on test`, on a chronological game-level
+split (441 train / 95 val / 95 test games), team rebounds excluded, scored per shot as
+top-1 of ten players. Feature selection and hyperparameters were chosen on validation;
+the table below is the single read on the held-out test split.
 
-| regime | slot prior | nearest to rim | conditional logit | random forest |
-|---|---|---|---|---|
-| **release** | 23.1% | 22.8% | 26.2% | **27.6%** |
-| **rim** | 23.1% | 31.7% | 32.8% | **35.8%** |
-| all | 23.1% | 31.7% | 33.6% | **36.7%** |
+| regime | what it knows | slot prior | nearest to rim | conditional logit | random forest | boosted softmax |
+|---|---|---|---|---|---|---|
+| **static** | ten positions | 23.8% | 23.2% | 26.1% | 26.7% | **27.5%** |
+| **served** | + derived features | 23.8% | 23.2% | 27.6% | 29.9% | 29.2% |
+| release | + real velocity | 23.8% | 23.2% | 26.9% | 28.9% | **28.5%** |
+| release+derived | both | 23.8% | 23.2% | 29.7% | 30.9% | **31.1%** |
+| rim | rim-time positions | 23.8% | 33.5% | 34.3% | 35.9% | **36.3%** |
+| all | everything | 23.8% | 33.5% | 35.6% | 38.2% | 38.0% |
 
-Two things fall out of this.
+`static` is what the web app can supply — a user places ten dots. `served` adds the
+derived features, which need nothing further from the user. The two rows below them
+add a release velocity the app has no way to collect, and are there to price it.
 
-**The train/serve gap is 8.2 points** (35.8% at rim time vs 27.6% at release, best
-model in each). That is the entire budget a movement model has to earn back, and it
-is smaller than the rebuild plan assumed. A perfect movement model — one that
-predicts rim-time positions exactly — buys 8 points of top-1. That reframes the
-scene-level CVAE from *the* blocking problem to one option among several, and makes
-"improve the rebounder model on release-time features" the competing use of the same
-effort.
+Four things fall out of this.
+
+**The servable model went from 26.7% to 29.2%** without asking the UI for anything new.
+Roughly a third of that is the model and two thirds the features; §*Where the gains
+came from* below splits it.
+
+**The train/serve gap is 7.1 points** (36.3% at rim time against 29.2% from what the
+app can supply). That is the entire budget a movement model has to earn back. It was
+8.2 points before this round of work and it shrinks every time the release-time model
+improves, which is worth stating plainly: effort spent on the rebounder and effort
+spent on the movement model are drawn from the same account, and the rebounder is the
+cheaper of the two.
+
+**Nothing separates the top three models by much.** Boosted softmax, random forest and
+— with the derived features in hand — the conditional logit land within about 1.5
+points of each other, and the boosted model does not win every row. On 5,750
+validation shots an unpaired standard error is 0.6 points, so differences under about
+1.2 points are not distinguishable at all; the comparisons quoted below use a paired
+bootstrap over games, which is considerably tighter. The features moved the number.
+The model choice mostly did not.
+
+**The gap between top-1 and top-3 is large and stable** — 29.2% against 66.8% in the
+served regime. The model is ranking sensibly and failing to separate the leaders,
+which is what one would expect of an event with a genuinely random component. A tool
+that narrows ten players to three is right two times in three.
 
 **The 2017 figure of 86% top-1 does not survive contact.** Reproducing that model
 family and scoring it three ways on the same data:
@@ -185,6 +229,74 @@ app actually asks. The 2017 code is gone, so this can't be confirmed directly; t
 weights survive only in the web app repo. Treated as a per-row number it is
 unremarkable, and nothing in the current data supports quoting 86% as top-1.
 
+### Where the gains came from
+
+**The features, mostly, and the relative ones above all.** Every feature in the
+original pipeline described a player on his own — his coordinates, his distance to the
+rim, his angle. Rebounding is a contest between ten people, so the quantities that
+decide it are comparisons: who is inside whom, who has space, how a player ranks
+against the other nine rather than how many feet he stands from the basket.
+[`rebounding/data/derived.py`](rebounding/data/derived.py) adds those, and they are a
+pure function of the ten positions, so the web app can compute every one of them from
+what a user already places on the court.
+
+The importance ranking makes the point better than the accuracy table does. In the
+served regime the model puts 31% of its gain on `n_opp_inside` — how many opponents
+are nearer the basket than this player — and another 11% on `dist_minus_mean`. Raw
+`pre_dist`, the feature the old model leaned on, drops out of the top ten entirely
+once the same information is present in relative form.
+
+**The model change is real but second-order.** Three ways of getting a tree ensemble
+to answer "which of these ten", on the same release-time features:
+
+| model | validation top-1 |
+|---|---|
+| random forest, per-row binary, renormalised afterwards | 27.6% |
+| LightGBM `lambdarank`, groups of ten | 28.0% |
+| LightGBM, grouped softmax | 28.5% |
+
+which is the ordering
+[`conditional_logit.py`](rebounding/models/conditional_logit.py) predicts: a per-row
+binary fit never sees the constraint that exactly one of the ten is the rebounder, and
+`lambdarank` optimises a ranking surrogate rather than the likelihood. Matching the
+loss to the metric is worth about a point.
+[`boosted.py`](rebounding/models/boosted.py) is that grouped softmax with a tree
+ensemble for a score function.
+
+**Velocity is worth less than it looks, and says something.** Over a shot's flight
+players travel 7.67 ft on average. Extrapolating each along his release velocity lands
+8.46 ft from the truth — *worse than assuming he never moves*, at 8.41 ft. Damped by
+the best-fitting factor of 0.38 it improves to 6.49 ft. Release-time velocity is worth
+about four tenths of a second of movement and nothing after that, because what a
+player does next is dominated by an intention his current heading does not reveal.
+That is the strongest argument in this repo for a generative scene model over a
+kinematic one, and equally the reason no cheap version of one will do.
+
+### What was tried and did not work
+
+Recorded because the next person will otherwise try them again.
+
+| idea | result |
+|---|---|
+| spatial target encoding: smoothed grid of "who rebounds from here", per shot-distance bucket and team | −0.02 pts. Boosting over `pre_x`, `pre_y`, `is_offense`, `shot_dist` already recovers it |
+| neighbour context: attach the nearest opponent's and nearest teammate's own features to each row | −0.50 pts, not distinguishable from noise |
+| hierarchical P(team) × P(player \| team) instead of one softmax over ten | −1.30 pts, and that one *is* significant |
+| set model: permutation-equivariant net pooling over own team and opponents, 3 blocks | 30.5% against the boosted model's 30.7% — a tie |
+| blending the boosted model with the conditional logit, or with the set model | +0.3 pts at best, inside the noise |
+| measured flight time instead of predicted | +0.23 pts, not distinguishable — so the servable version costs nothing |
+
+The set model is the interesting negative. It is the architecture the rebuild plan
+proposes for the movement model, applied to the rebounder, and on 27k training shots
+it matches gradient boosting rather than beating it. Depth tells the same story from
+the other direction: 127 leaves scored a point *worse* than 63 at every learning rate
+tried. The corpus cannot grow — see [`data/MANIFEST.md`](data/MANIFEST.md) — so this is
+a standing constraint, not a tuning accident. Capacity is not what is missing.
+
+What is missing is more likely information. Nothing in the current feature set knows
+the ball: its arc, its entry angle, where it actually caroms. Those need a rebuild of
+the frame from the tracking corpus rather than a better model, and only the parts of
+them a user could plausibly specify are servable.
+
 *What follows describes the 2017 work and what replaces it.*
 
 Two models, chained. The **rebounder model** predicts who gets the board from where
@@ -202,17 +314,24 @@ box-outs were unrepresentable.
 
 There is also a train/serve skew that no amount of movement-model quality fixes: the
 rebounder was trained and evaluated on ground-truth rim-time positions but served
-predicted ones. That skew is now measured rather than argued about — 8.2 points of
-top-1 — and the honest headline number is accuracy **from release-time inputs**,
-currently 27.6%.
+predicted ones. That skew is now measured rather than argued about — 7.1 points of
+top-1 — and the honest headline number is accuracy **from what the app can supply**,
+currently 29.2%.
 
-The rebuild plan: a scene-level conditional VAE with a set-transformer encoder for
-movement, sampling coherent futures rather than one averaged guess; and a grouped
-softmax over the ten players for the rebounder, which matches the evaluation metric
-directly and removes the class-weight hacks the original needed. `features.to_tensor`
-already emits the `(n_shots, 10, n_features)` form in canonical slot order — offense
-then defense, each nearest-to-rim first — which is what lets a plain logistic
-regression or random forest consume a whole shot at once.
+The rebounder half of the rebuild plan is done: the grouped softmax matches the
+evaluation metric directly and removes the class-weight hacks the original needed, and
+`features.to_tensor` emits the `(n_shots, 10, n_features)` form in canonical slot order
+— offense then defense, each nearest-to-rim first — which is what lets any of these
+models consume a whole shot at once.
+
+What remains is the movement half: a scene-level conditional VAE with a
+set-transformer encoder, sampling coherent futures rather than one averaged guess. Two
+results above bear on it. Its accuracy budget is 7.1 points and shrinking, so it should
+be justified as a UI feature — the predicted movement is what the app draws — rather
+than as an accuracy device; that argument is made in
+[`docs/webapp-handoff.md`](docs/webapp-handoff.md). And the fact that constant-velocity
+extrapolation is worse than assuming nobody moves says the problem it has to solve is
+real, not a matter of arithmetic on a heading.
 
 ## Credits
 
