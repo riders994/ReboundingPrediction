@@ -1,0 +1,249 @@
+"""Per-shot player features.
+
+Replaces ``features()`` and ``boxgen()`` in ``coordinator.py``, and the per-shot
+``iterrows`` loop in ``obConstructor`` that dominated the old runtime.
+
+Output is long: one row per (shot, player), ten rows per shot. Use
+:func:`to_tensor` to reshape into the ``(n_shots, 10, n_features)`` form the Phase 4
+model ladder needs.
+
+Notable changes:
+
+* **Coordinates are folded once per shot** with the attacking basket resolved from
+  the ball, via :mod:`rebounding.data.court`. The old code applied ``abs(x - 47)``
+  independently to each player, which both flipped court handedness and reflected
+  back-court players into the front court.
+* **Canonical slot ordering**: offense then defense, each sorted by distance to the
+  rim *at release*. This gives every column of the flattened tensor a stable
+  meaning ("nearest offensive player", "second-nearest defender"), which is what
+  lets a plain logistic regression or random forest consume a whole shot at once
+  instead of one player at a time. Ordering uses release-time distance because
+  that is all the web app has at prediction time -- ordering on rim-time distance
+  would not be reproducible when serving.
+* **Team rebounds are kept**, labelled via ``IsTeamRebound`` rather than dropped.
+  The old ``features()`` returned ``[]`` whenever no individual rebounder matched.
+* **Velocity is included.** The old pipeline extracted two isolated frames and
+  never computed motion, which is the most likely single reason the movement model
+  underperformed.
+* ``boxgen`` asserts its shape instead of silently producing wrong counts when a
+  tracking glitch yields other than five players a side.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from rebounding.constants import HOOP
+from rebounding.data.court import fold, fold_vector, rim_angle, rim_distance
+from rebounding.data.sportvu import GameTracking
+
+N_PLAYERS = 10
+TEAM_SIZE = 5
+
+# Window used to estimate velocity by finite difference. At 25 Hz a single frame
+# step is far too noisy to differentiate.
+VELOCITY_WINDOW_FRAMES = 5
+
+PLAYER_FEATURES = [
+    "pre_x", "pre_y", "pre_dist", "pre_angle", "pre_vx", "pre_vy", "pre_speed",
+    "pos_x", "pos_y", "pos_dist", "pos_angle",
+    "move_dx", "move_dy", "move_dist", "closed_on_rim",
+    "pre_cos_shooter", "pos_cos_shooter",
+    "pre_box", "pos_box",
+    "is_offense", "is_shooter", "role",
+]
+
+# Identity features, true at both moments and usable in either regime below.
+_STATIC_FEATURES = ["is_offense", "is_shooter", "role"]
+
+# Everything knowable when the ball leaves the shooter's hand. This is what the web
+# app can actually supply, because a user places players once and presses go.
+RELEASE_FEATURES = [
+    "pre_x", "pre_y", "pre_dist", "pre_angle", "pre_vx", "pre_vy", "pre_speed",
+    "pre_cos_shooter", "pre_box", *_STATIC_FEATURES,
+]
+
+# Everything knowable once the ball reaches the rim, including how each player moved
+# to get there. Training on these measures the ceiling, not a servable model: at
+# prediction time these positions do not exist yet and would have to be forecast.
+# The 2017 work reported 86% top-1 from this regime while serving predicted inputs,
+# which is the train/serve skew the two regimes exist to quantify.
+RIM_FEATURES = [
+    "pos_x", "pos_y", "pos_dist", "pos_angle", "pos_cos_shooter", "pos_box",
+    "move_dx", "move_dy", "move_dist", "closed_on_rim", *_STATIC_FEATURES,
+]
+
+FEATURE_REGIMES = {
+    "release": RELEASE_FEATURES,
+    "rim": RIM_FEATURES,
+    "all": PLAYER_FEATURES,
+}
+
+
+def boxgen(xy: np.ndarray) -> np.ndarray:
+    """Crude box-out counts: how many opponents each player is nearest to.
+
+    A single K-means iteration in spirit, kept from the original for continuity.
+    ``xy`` must be ``(10, 2)`` ordered with one team in the first five rows.
+
+    The original reshaped to ``(10, 1)`` and sliced ``[:5]`` / ``[5:]`` with no
+    check, so a tracking glitch that produced a six/four split returned wrong counts
+    without failing.
+    """
+    if xy.shape != (N_PLAYERS, 2):
+        raise ValueError(f"boxgen expects (10, 2), got {xy.shape}")
+
+    first, second = xy[:TEAM_SIZE], xy[TEAM_SIZE:]
+    # distances[i, j] = distance from second-team player i to first-team player j
+    distances = np.linalg.norm(second[:, None, :] - first[None, :, :], axis=2)
+    nearest_first = np.argmin(distances, axis=1)  # for each second-team player
+    nearest_second = np.argmin(distances, axis=0)  # for each first-team player
+
+    first_counts = np.bincount(nearest_first, minlength=TEAM_SIZE)
+    second_counts = np.bincount(nearest_second, minlength=TEAM_SIZE)
+    return np.concatenate([first_counts, second_counts]).astype(np.float32)
+
+
+def _velocity(tracking: GameTracking, index: int, quarter: int) -> np.ndarray:
+    """Per-player ``(10, 2)`` velocity in ft/s, by backward difference."""
+    moments = tracking.moments
+    start = max(0, index - VELOCITY_WINDOW_FRAMES)
+
+    # Never differentiate across a quarter boundary.
+    quarters = moments["Quarter"].to_numpy()
+    while start < index and quarters[start] != quarter:
+        start += 1
+
+    dt = float(moments["GameClock"].iat[start] - moments["GameClock"].iat[index])
+    if dt <= 0:
+        return np.zeros((N_PLAYERS, 2), dtype=np.float32)
+
+    displacement = tracking.player_xyz[index, :, :2] - tracking.player_xyz[start, :, :2]
+    return (displacement / dt).astype(np.float32)
+
+
+def shot_features(tracking: GameTracking, shot: pd.Series) -> pd.DataFrame | None:
+    """Ten rows of features for one paired shot, or ``None`` if it cannot be built."""
+    release, rim = int(shot["ReleaseIdx"]), int(shot["RimIdx"])
+    basket = str(shot["Basket"])
+
+    player_ids = tracking.player_ids[release]
+    if not np.array_equal(np.sort(player_ids), np.sort(tracking.player_ids[rim])):
+        # Substitution or tracking dropout between the two frames. The old code
+        # left-joined here, so a player present at one frame and absent at the other
+        # produced NaN feature values that flowed into the training frame.
+        return None
+
+    # Reorder the rim frame to match the release frame's player order.
+    rim_order = np.array([int(np.flatnonzero(tracking.player_ids[rim] == pid)[0]) for pid in player_ids])
+
+    pre_xy = fold(tracking.player_xyz[release, :, :2], basket)
+    pos_xy = fold(tracking.player_xyz[rim][rim_order][:, :2], basket)
+    velocity = fold_vector(_velocity(tracking, release, int(shot["Period"])), basket)
+
+    team_ids = tracking.team_ids[release]
+    shoot_team = shot.get("ShootTeamID")
+    is_offense = (
+        (team_ids == int(shoot_team)).astype(np.float32)
+        if pd.notna(shoot_team)
+        else np.zeros(N_PLAYERS, np.float32)
+    )
+    if int(is_offense.sum()) != TEAM_SIZE:
+        # Without a clean five/five split the box-out counts are meaningless and
+        # the canonical ordering has no defined team blocks.
+        return None
+
+    shooter_id = shot.get("ShootPlayerID")
+    is_shooter = (
+        (player_ids == int(shooter_id)).astype(np.float32)
+        if pd.notna(shooter_id)
+        else np.zeros(N_PLAYERS, np.float32)
+    )
+    if is_shooter.sum() != 1:
+        return None
+
+    pre_dist, pos_dist = rim_distance(pre_xy), rim_distance(pos_xy)
+    pre_angle, pos_angle = rim_angle(pre_xy), rim_angle(pos_xy)
+    shooter_slot = int(np.argmax(is_shooter))
+
+    move = pos_xy - pre_xy
+    frame = pd.DataFrame(
+        {
+            "pre_x": pre_xy[:, 0], "pre_y": pre_xy[:, 1],
+            "pre_dist": pre_dist, "pre_angle": pre_angle,
+            "pre_vx": velocity[:, 0], "pre_vy": velocity[:, 1],
+            "pre_speed": np.hypot(velocity[:, 0], velocity[:, 1]),
+            "pos_x": pos_xy[:, 0], "pos_y": pos_xy[:, 1],
+            "pos_dist": pos_dist, "pos_angle": pos_angle,
+            "move_dx": move[:, 0], "move_dy": move[:, 1],
+            "move_dist": np.linalg.norm(move, axis=1),
+            # Signed: positive when the player ended up closer to the rim.
+            "closed_on_rim": np.where(pos_dist < pre_dist, 1.0, -1.0),
+            "pre_cos_shooter": np.cos(pre_angle - pre_angle[shooter_slot]),
+            "pos_cos_shooter": np.cos(pos_angle - pos_angle[shooter_slot]),
+            "is_offense": is_offense,
+            "is_shooter": is_shooter,
+            "role": [tracking.roles.get(str(int(pid)), 3.0) for pid in player_ids],
+            "PlayerID": player_ids,
+            "TeamID": team_ids,
+        }
+    )
+
+    # Canonical slots: offence first, then defence, each nearest-to-rim first at
+    # release. Deterministic and reproducible from release-time data alone.
+    frame = frame.sort_values(
+        ["is_offense", "pre_dist"], ascending=[False, True], kind="stable"
+    ).reset_index(drop=True)
+
+    frame["pre_box"] = boxgen(frame[["pre_x", "pre_y"]].to_numpy())
+    frame["pos_box"] = boxgen(frame[["pos_x", "pos_y"]].to_numpy())
+
+    frame["Slot"] = np.arange(N_PLAYERS)
+    frame["ShotID"] = shot["ShotID"]
+    frame["GameID"] = shot["GameID"]
+    frame["FlightTime"] = shot["FlightTime"]
+    frame["IsTeamRebound"] = bool(shot["IsTeamRebound"])
+    reb_player = shot.get("RebPlayerID")
+    frame["Rebounder"] = (
+        (frame["PlayerID"] == int(reb_player)).astype(int) if pd.notna(reb_player) else 0
+    )
+
+    # A shot whose credited rebounder is not on the floor in the tracking data is
+    # unusable as a training example, whether or not it was a team rebound.
+    if not frame["IsTeamRebound"].iat[0] and frame["Rebounder"].sum() != 1:
+        return None
+    return frame
+
+
+def build(tracking: GameTracking, paired: pd.DataFrame) -> pd.DataFrame:
+    """Feature rows for every paired shot in a game."""
+    frames = [f for f in (shot_features(tracking, shot) for _, shot in paired.iterrows()) if f is not None]
+    if not frames:
+        return pd.DataFrame(columns=[*PLAYER_FEATURES, "ShotID", "GameID", "Slot", "Rebounder"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def to_tensor(
+    rows: pd.DataFrame, features: list[str] | None = None
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Long rows to ``(n_shots, 10, n_features)`` plus a ``(n_shots, 10)`` label array.
+
+    The canonical ordering in :func:`shot_features` is what makes the middle axis
+    mean the same thing across shots, so a flattened ``10 * n_features`` vector is
+    coherent for models that cannot handle sets.
+    """
+    features = features or PLAYER_FEATURES
+    ordered = rows.sort_values(["ShotID", "Slot"], kind="stable")
+    n_shots = ordered["ShotID"].nunique()
+
+    values = ordered[features].to_numpy(dtype=np.float32)
+    labels = ordered["Rebounder"].to_numpy(dtype=np.int8)
+    if len(ordered) != n_shots * N_PLAYERS:
+        raise ValueError(f"expected {N_PLAYERS} rows per shot, got {len(ordered)} for {n_shots} shots")
+
+    return values.reshape(n_shots, N_PLAYERS, len(features)), labels.reshape(n_shots, N_PLAYERS), features
+
+
+def hoop_xy() -> tuple[float, float]:
+    return HOOP

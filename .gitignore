@@ -1,4 +1,23 @@
-*.ip*
+# Bulk data and build products. Notebooks are tracked deliberately -- the original
+# `*.ip*` rule is why the 2017 modelling work was never committed and is now lost.
 *.csv
 *.json
 *.pkl
+*.h5
+
+# Test fixtures must be tracked despite the patterns above.
+!tests/fixtures/**
+
+# Cached Basketball-Reference pages: ~250 KB each, ~160 MB over the corpus, and
+# refetchable in about 35 minutes. See rebounding/data/bref.py.
+data/bref/
+
+# Build products. `cli.py build` regenerates these from the tracking archives and
+# the page cache; only the inputs belong in git.
+*.parquet
+
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
