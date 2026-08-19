@@ -185,12 +185,20 @@ half-court length and its `y` is the 50 ft width, so **screen-across is model `y
 screen-down is model `x`** — the ranges admit no other reading. SVG `y` grows downward
 and the basket is at the bottom, so canvas-down and model-`x` agree with no flip.
 
-Still open: which physical side of the floor screen-left corresponds to. Getting it
-backwards mirrors the scene about the length axis, which maps a play onto its own
-reflection — the model has seen plenty of both, the probabilities stay attached to the
-right players, and the only loss is whatever genuine left/right asymmetry was learned.
-Settle it with `rebounding/data/court.py::describe_side_convention` when convenient.
-The pipeline has not settled it either, so this is not a debt the app owes.
+The width axis is settled too. SportVU is a true bird's-eye view of the whole floor —
+which is *why* the data has to be folded at all, both baskets being recorded — so the
+model frame carries real-world chirality, and `court.fold` folds with a 180° rotation,
+which preserves it. The canvas swap preserves it as well, though the arithmetic looks
+like it should not: `(cx, cy) → (cy, cx)` has determinant −1, but SVG `y` points down,
+so the canvas is already left-handed as drawn and the two reversals cancel.
+
+**And the question turns out not to matter.** Mirroring every shot in the test split
+about the length axis and rescoring gives 30.1% top-1 either way — identical to a tenth
+of a point against a 0.60 point standard error, log loss 1.857 against 1.859, the same
+player picked on 85.2% of shots, and a mean probability change of 0.012. The model has
+not learned a usable left/right asymmetry. Getting the width convention wrong would be
+undetectable; getting the length convention wrong would put every player at the wrong
+distance from the rim. Only one of these two was ever worth worrying about.
 
 ### 3.6 Feature order is positional and undocumented — **verified**
 
@@ -525,9 +533,10 @@ artifact works on the host before pointing the app at it.
    wait. Note that the app has to load it first — `webapp_port/movement.py` reproduces
    its 2017 input contract but has never been run against the real weights, because
    there is no TensorFlow in the parent repo's environment.
-5. ~~**Confirm the coordinate frame**~~ **Done for the axis that matters** (§3.5): the
-   canvas is the basket half, basket at the bottom, so screen-down is model `x` with no
-   flip. Only the left/right handedness is still unpinned, and it is second-order.
+5. ~~**Confirm the coordinate frame**~~ **Done** (§3.5). The canvas is the basket half
+   with the basket at the bottom, so screen-down is model `x`; SportVU's bird's-eye view
+   and the rotational fold settle the width axis. Neither flip is set, and mirroring the
+   test split shows the width convention is worth 0.0 points anyway.
 6. **Correct the accuracy copy** (§4).
 7. **Deploy under gunicorn** (§6).
 
