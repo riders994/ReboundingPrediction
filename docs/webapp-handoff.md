@@ -132,7 +132,7 @@ the variable named `closer` is `+1` for moving *away*. The pipeline's equivalent
 `+1` for moving *toward*. The two are exact opposites, so `MoveV` carries the wrong
 sign on every player.
 
-### 3.4 Rendered positions are transposed against modelled positions — **verified**
+### 3.4 Rendered positions are transposed against modelled positions — **withdrawn**
 
 ```python
 self.pos['x']    = self.posArr[:,0]
@@ -142,29 +142,55 @@ self.pos['newx'] = self.posArr[:,1]     # <- newx gets column 1
 ```
 
 `x`/`y` feed the model; `newx`/`newy` are what `Modeling()` returns and what the
-browser draws. They are assigned from opposite columns. **The predicted positions
-drawn on screen are transposed relative to the ones the prediction was computed
-from.**
+browser draws. They are assigned from opposite columns.
 
-This is the most damaging bug in the app, because the drawn movement is the product
-(§5) — not a debug overlay. Whatever the movement model's real quality, the user has
-never seen it: they have been watching its output reflected about the line `x = y`.
-Any judgement anyone has formed about how good the movement predictions look is
-based on transposed coordinates. Fix this before evaluating `posnn.h5` at all.
+**This section was wrong, and acting on it would break the app.** It is not a
+transposition bug. It is the conversion from model coordinates back to canvas
+coordinates, and the two frames genuinely do have their axes swapped — see §3.5. `x`
+and `y` stay in the model frame because they are about to be fed back through
+`features()`; `newx` and `newy` are the same points in the frame the browser draws in.
+The matching swap on the way in is the innocuous-looking line
 
-### 3.5 There is no court folding at all — **needs checking**
+```python
+df.columns = ['Off', 'isShoot', 'y', 'x']
+```
 
-The app takes canvas coordinates and computes distance to a single hardcoded hoop.
-The training data is *folded* onto one half court by a 180° rotation, with the
-attacking basket resolved per shot from the ball at the rim. The old pipeline folded
-with `abs(x - 47)`, which is a reflection, not a rotation — so left-wing and
-right-wing shots were superimposed.
+which renames the incoming `x` column to `y` and vice versa. Both swaps are correct and
+they compose to the identity. Reversing either one — as the original version of this
+section instructed — introduces exactly the reflection about `x = y` that it warned
+about.
 
-What needs confirming with the repo checked out: what coordinate frame `public/script.js`
-emits, its origin and axis directions, and whether it matches the folded frame the
-pipeline produces. If the handedness is flipped, every left/right-asymmetric feature
-is mirrored at serve time. `rebounding/data/court.py::describe_side_convention` exists
-to make this checkable — feed it a known position and see which side it reports.
+**A real trap does live in that line, for anyone porting it.** It works only because
+Python 2's pandas sorted dict keys alphabetically, giving `isOffense, isShooter, x, y`.
+Modern pandas preserves insertion order, so the same statement now names the incoming
+`x` column `Off` and `y` column `isShoot`. It produces nonsense silently, with no
+error. The port replaces the whole thing with an explicit conversion in
+`webapp_port/coordinates.py`.
+
+There is also a genuine bug nearby that this section missed. The original `boxgen`
+builds `dbox` from `o`, whose values index the *second* five-player block, then
+concatenates it first — so each team is assigned the other team's box-out counts.
+`rebounding/data/features.py::boxgen` does not have this problem. The 2017 movement
+model was trained on the broken version, so the port reproduces it deliberately as that
+model's input contract and nowhere else.
+
+### 3.5 The canvas frame — **resolved, except for handedness**
+
+`public/script.js` draws a 500×470 SVG and posts `xy / 10`, so it emits feet: `x` in
+`[0, 50]` across the screen and `y` in `[0, 47]` down it. The canvas shows **only the
+basket half of the court, with the basket at the bottom** (confirmed by Rohan).
+
+That fixes the frame completely on the length axis. The model's `x` is the 47 ft
+half-court length and its `y` is the 50 ft width, so **screen-across is model `y` and
+screen-down is model `x`** — the ranges admit no other reading. SVG `y` grows downward
+and the basket is at the bottom, so canvas-down and model-`x` agree with no flip.
+
+Still open: which physical side of the floor screen-left corresponds to. Getting it
+backwards mirrors the scene about the length axis, which maps a play onto its own
+reflection — the model has seen plenty of both, the probabilities stay attached to the
+right players, and the only loss is whatever genuine left/right asymmetry was learned.
+Settle it with `rebounding/data/court.py::describe_side_convention` when convenient.
+The pipeline has not settled it either, so this is not a debt the app owes.
 
 ### 3.6 Feature order is positional and undocumented — **verified**
 
@@ -489,14 +515,19 @@ artifact works on the host before pointing the app at it.
    Delete `features()` and `boxgen()` from the app and call `rebounding.serve.predict`
    instead — it exists now, it is tested against the pipeline's own output, and it
    leaves exactly one definition of every feature. See "the serving entry point" in §5.
-3. **Fix §3.4** (the transposed render) — one line, and it gates step 4.
-4. **Look at `posnn.h5` honestly, for the first time.** With the transpose fixed and
-   the coordinate frame confirmed, run some real plays through it and watch. It may be
-   adequate as a visual, or the paint-drift may be obvious on sight. That observation
-   decides whether the CVAE rebuild is urgent or can wait — and it is unavailable until
-   step 3 lands.
-5. **Confirm the coordinate frame** (§3.5) with a known-position round trip before
-   trusting any number or any drawn position the app produces.
+3. ~~**Fix §3.4**~~ **Do not.** That section has been withdrawn: the assignment it
+   flags is a coordinate-frame conversion, not a transposition, and reversing it breaks
+   the render. Nothing gates step 4 any more.
+4. **Look at `posnn.h5` honestly, for the first time.** Nothing blocks this now: the
+   coordinate frame is settled (§3.5) and there was never a transpose to fix. Run real
+   plays through it and watch. It may be adequate as a visual, or the paint-drift may be
+   obvious on sight. That observation decides whether the CVAE rebuild is urgent or can
+   wait. Note that the app has to load it first — `webapp_port/movement.py` reproduces
+   its 2017 input contract but has never been run against the real weights, because
+   there is no TensorFlow in the parent repo's environment.
+5. ~~**Confirm the coordinate frame**~~ **Done for the axis that matters** (§3.5): the
+   canvas is the basket half, basket at the bottom, so screen-down is model `x` with no
+   flip. Only the left/right handedness is still unpinned, and it is second-order.
 6. **Correct the accuracy copy** (§4).
 7. **Deploy under gunicorn** (§6).
 
