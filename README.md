@@ -29,12 +29,27 @@ fixed and a test suite over a committed sample game. The rebounder model has bee
 rebuilt on top of it: 29.2% top-1 from the inputs the web app can actually supply,
 against 26.7% for the model family it replaces.
 
-**The models are not in this repo.** The original `.gitignore` excluded `*.ip*` and
-`*.pkl`, so the notebooks and weights were never committed here. The movement model
-(`posnn.h5`) and its normaliser (`msd.pkl`) survive in the companion web app repo,
-[riders994/ReboundWebApp](https://github.com/riders994/ReboundWebApp); the rebounder
-(`FinalModel.pkl`) is referenced by that app's `webapp.py` but is not committed
-anywhere. Rebuilding both is the next phase.
+**The rebounder is buildable in one command.** `python -m rebounding.cli train` fits
+it and writes `FinalModel.pkl` — the model, the fitted `ShotPriors`, the served
+feature list in fitted order, and the provenance to identify the file later. It takes
+about eighteen seconds. The shipping fit uses train+val and scores **30.1% top-1** on
+the untouched test games; every ladder number below is the train-only fit, which is
+what keeps the regimes comparable.
+
+**The app calls one function.** `rebounding/serve.py::predict` takes ten placed
+positions, which team is attacking and who shot, and returns a probability per player
+in the caller's own order. It reproduces the training path's 27 features to 0.0 maximum
+absolute difference on real shots, which is the property the web app never had: there
+is now exactly one definition of every feature, and it lives here.
+
+**The weights are deliberately not committed.** `.gitignore` still excludes `*.pkl`
+and `*.h5`, and the artifact reaches the web app host by scp rather than through git.
+That is a choice this time rather than the accident that lost the 2017 model, and it
+is why the bundle carries its own provenance: `cli describe --model FinalModel.pkl`
+answers "which model is on the box?" from the file itself. The movement model
+(`posnn.h5`) and its normaliser (`msd.pkl`) survive only in the companion web app repo,
+[riders994/ReboundWebApp](https://github.com/riders994/ReboundWebApp). Rebuilding that
+half is the next phase.
 
 ## Data
 
@@ -316,7 +331,8 @@ There is also a train/serve skew that no amount of movement-model quality fixes:
 rebounder was trained and evaluated on ground-truth rim-time positions but served
 predicted ones. That skew is now measured rather than argued about — 7.1 points of
 top-1 — and the honest headline number is accuracy **from what the app can supply**,
-currently 29.2%.
+29.2% for the train-only fit the ladder above compares and **30.1% for the weights
+that actually ship**, both on the same held-out test games.
 
 The rebounder half of the rebuild plan is done: the grouped softmax matches the
 evaluation metric directly and removes the class-weight hacks the original needed, and

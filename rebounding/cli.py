@@ -1,6 +1,8 @@
 """Command line entry points.
 
     python -m rebounding.cli build   --games data/7zips --out data/frame.parquet
+    python -m rebounding.cli train   --out FinalModel.pkl
+    python -m rebounding.cli predict --players players.json
     python -m rebounding.cli inspect --game data/7zips/01.01.2016.CHA.at.TOR.7z
 
 ``build`` needs play-by-play. ``stats.nba.com`` no longer serves it, so it comes
@@ -19,6 +21,7 @@ import sys
 from pathlib import Path
 
 from rebounding.data import build, sportvu
+from rebounding.models import artifact
 
 
 def _build(args: argparse.Namespace) -> int:
@@ -57,6 +60,56 @@ def _baseline(args: argparse.Namespace) -> int:
     print(split.summary())
     print()
     print(baseline.format_results(results))
+    return 0
+
+
+def _train(args: argparse.Namespace) -> int:
+    """Fit the deployable model and write the bundle the web app loads."""
+    if not Path(args.frame).exists():
+        print(f"no frame at {args.frame}; run `build --out {args.frame}` first", file=sys.stderr)
+        return 1
+
+    built = artifact.build(args.frame, fit_on=args.fit_on)
+    path = artifact.save(built, args.out)
+    print(built.describe())
+    print()
+    print(f"wrote {path} ({path.stat().st_size / 1e6:.2f} MB)")
+    # The weights are gitignored by choice, so the only record of what shipped is the
+    # file itself. Say where it has to go rather than leaving it in the working tree.
+    print(f"scp it to the web app host; `describe --model {path}` prints this block again")
+    return 0
+
+
+def _describe(args: argparse.Namespace) -> int:
+    """Print a bundle's provenance -- what is this file, and what did it score?"""
+    if not Path(args.model).exists():
+        print(f"no artifact at {args.model}", file=sys.stderr)
+        return 1
+    print(artifact.load(args.model).describe())
+    return 0
+
+
+def _predict(args: argparse.Namespace) -> int:
+    """Score one placed shot from a JSON file. A smoke test for a deployed artifact."""
+    import json
+
+    from rebounding.serve import PlacementError, predict
+
+    for label, path in (("artifact", args.model), ("players", args.players)):
+        if not Path(path).exists():
+            print(f"no {label} at {path}", file=sys.stderr)
+            return 1
+
+    players = json.loads(Path(args.players).read_text())
+    try:
+        prediction = predict(artifact.load(args.model), players, basket=args.basket)
+    except PlacementError as exc:
+        print(f"cannot score these placements: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{'rank':>4} {'input':>5} {'slot':>4} {'p':>7}")
+    for rank, (index, probability) in enumerate(prediction.ranked(), start=1):
+        print(f"{rank:>4} {index:>5} {prediction.slots[index]:>4} {probability:>7.1%}")
     return 0
 
 
@@ -109,6 +162,40 @@ def main(argv: list[str] | None = None) -> int:
         help="which split to score on; test is for the final read, not for choosing",
     )
     baseline_cmd.set_defaults(func=_baseline)
+
+    train_cmd = sub.add_parser("train", help="fit the deployable model and write FinalModel.pkl")
+    train_cmd.add_argument("--frame", default="data/frame.parquet", help="parquet from `build`")
+    train_cmd.add_argument(
+        "--out",
+        default=str(artifact.DEFAULT_OUTPUT),
+        help="where to write the bundle; gitignored by design and deployed by scp",
+    )
+    train_cmd.add_argument(
+        "--fit-on",
+        default="train+val",
+        choices=list(artifact.FIT_CHOICES),
+        help="train+val is the shipping fit; train reproduces the README ladder",
+    )
+    train_cmd.set_defaults(func=_train)
+
+    describe_cmd = sub.add_parser("describe", help="print a built artifact's provenance and scores")
+    describe_cmd.add_argument("--model", default=str(artifact.DEFAULT_OUTPUT))
+    describe_cmd.set_defaults(func=_describe)
+
+    predict_cmd = sub.add_parser("predict", help="score one placed shot from a json file")
+    predict_cmd.add_argument("--model", default=str(artifact.DEFAULT_OUTPUT))
+    predict_cmd.add_argument(
+        "--players",
+        required=True,
+        help="json list of ten {x, y, is_offense, is_shooter, position} objects",
+    )
+    predict_cmd.add_argument(
+        "--basket",
+        default=None,
+        choices=["left", "right"],
+        help="give this only for full-court coordinates; omit for folded half-court ones",
+    )
+    predict_cmd.set_defaults(func=_predict)
 
     inspect_cmd = sub.add_parser("inspect", help="tracking-only summary for one game")
     inspect_cmd.add_argument("--game", required=True)

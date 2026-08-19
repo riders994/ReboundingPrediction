@@ -212,9 +212,16 @@ per-row AUC. The most likely reading is that it was a per-row metric over the
 ten-times-longer row table, not a per-shot one. The 2017 code is gone, so this cannot
 be confirmed directly — state it as the reading the arithmetic supports.
 
-**The honest number for the app is top-1 from what a user can actually supply: 29.2%**
+**The honest number for the app is top-1 from what a user can actually supply: 30.1%**
 on the held-out test split. Against a 10-player field, chance is 10% and the positional
 prior alone is 23.8%.
+
+That is the score of the weights in `FinalModel.pkl`, and it is the figure to put on
+the site. The ladders in this document all read 29.2%, which is the same model fitted
+on the training games only — the comparison basis that keeps the regimes honest
+against each other. The shipped artifact adds the 95 validation games to the fit once
+the hyperparameters are settled, which is worth 0.9 points. The test games are held
+out of both. Quote 30.1%: it belongs to the model actually being served.
 
 That figure moved after this brief was first written. It was 27.6%, from a random
 forest on release-time features. Two changes since, both in the parent repo and
@@ -370,6 +377,91 @@ LightGBM under that same grouped loss;
 is the fallback if a LightGBM dependency is unwelcome in the serving image, at a cost
 of about 1.6 points.
 
+### Loading the artifact
+
+`FinalModel.pkl` is a `rebounding.models.artifact.ModelArtifact`, not a bare
+estimator. It holds the model, the **fitted `ShotPriors`**, the served feature list in
+fitted order, and a provenance block. Load it through the package rather than with a
+bare `joblib.load`, which will give a clearer error when a dependency is missing:
+
+```python
+from rebounding.models.artifact import load
+
+artifact = load("FinalModel.pkl")
+probabilities = artifact.predict_proba(x)   # (n_shots, 10, 27) -> (n_shots, 10)
+```
+
+Three things follow from the shape of that bundle:
+
+- **The priors travel with the model.** `flight_hat` and the shot-context features
+  need the damping constant and the flight-time regression fitted on the training
+  games. Use `artifact.priors.transform(rows)`, never a freshly constructed
+  `ShotPriors` — an unfitted one raises, and one refitted on serving data would be a
+  different feature.
+- **`artifact.features` is authoritative, not the imported `SERVED_FEATURES`.** It is
+  the order the trees were fitted in. If the package moves on and the deployed bundle
+  does not, `load` warns; build the input array from `artifact.features` and that
+  drift cannot silently reorder your columns. This is the fix for §3.6.
+- **The serving host needs `rebounding` importable**, plus lightgbm. The bundle
+  references its classes by import path, so unpickling imports them.
+
+`python -m rebounding.cli describe --model FinalModel.pkl` prints the commit, the
+corpus hash, what it was fitted on and what it scored. Since the weights are not in
+git, that block is the only way to tell which model is on the box — worth capturing in
+the deploy log after each scp.
+
+### The serving entry point — use this instead of building features in the app
+
+`rebounding/serve.py` turns ten placed dots into probabilities. **This replaces
+`features()` and `boxgen()` in `webapp.py` entirely**, and it is what step 2 of §7 means
+by importing the pipeline's versions. Do not reimplement folding, slot ordering or
+box-out counts in the app.
+
+```python
+from rebounding.models.artifact import load
+from rebounding.serve import predict, PlacementError
+
+artifact = load("FinalModel.pkl")
+prediction = predict(artifact, players)      # players: ten dicts, straight from JSON
+
+prediction.probabilities   # np.ndarray, indexed exactly as `players` was
+prediction.ranked()        # [(input index, probability), ...] most likely first
+prediction.most_likely()   # index into `players`
+```
+
+Each player is `{"x": …, "y": …, "is_offense": bool, "is_shooter": bool,
+"position": "G"|"F-C"|… }`, with optional `player_id`. Coordinates are the **folded**
+half-court frame — `x` 0 at half court to 47 at the baseline, `y` in `[0, 50]`, rim at
+`(41.75, 25)` — which is the frame `webapp.py` was already almost using with its
+`41.65` hoop. Pass `basket="left"|"right"` instead if you are handing over full-court
+coordinates.
+
+Four things worth knowing:
+
+- **The result is indexed the way you passed the players in.** The ten are reordered
+  internally into canonical slots to be scored and the probabilities are mapped back,
+  with `prediction.slots` recording where each one went. You never have to think about
+  slot order — and you must not assume the output is in it.
+- **Supply `position` if the UI can.** Leaving it unset defaults every player to `3.0`
+  and costs about **1.4 points of top-1**, measured on the test split. That is a bigger
+  loss than several of the fixes in §3 are worth gaining.
+- **Invalid placements raise `PlacementError`**, not a bad prediction: nine players,
+  six on offense, two shooters, a defensive shooter, or coordinates that look like an
+  unfolded frame. Catch it and surface it to the user — the pipeline drops such shots
+  rather than featurising them, so there is no sensible answer to return.
+- **An artifact wanting velocity is refused outright.** If the served feature list ever
+  grows `pre_vx`, `v_radial` or an `ext_*` column, `predict` raises rather than quietly
+  passing zeros, because zeros to a velocity-trained model is the skew §5 warns about.
+
+Verified against the pipeline: replaying real shots from the corpus through
+`serve.feature_frame` reproduces all 27 columns the training path computed to **0.0
+maximum absolute difference**, and scoring test shots through `predict` matches the
+tensor path exactly. There is no train/serve skew left in the feature layer.
+
+`python -m rebounding.cli predict --model FinalModel.pkl --players players.json` runs
+one shot from the command line, which is the quickest way to confirm a freshly scp'd
+artifact works on the host before pointing the app at it.
+
 ---
 
 ## 6. Deployment
@@ -388,12 +480,15 @@ of about 1.6 points.
 
 ## 7. Suggested order
 
-1. **Retrain and commit a rebounder.** Nothing else can be tested until the app has
-   weights. Use the `served` regime of §5; remove `*.pkl` from `.gitignore` or use Git
-   LFS, or the same loss happens again.
+1. ~~**Retrain a rebounder.**~~ **Done — the artifact exists.** `python -m
+   rebounding.cli train` in the parent repo writes `FinalModel.pkl` (2.53 MB) and it
+   reaches the app host by **scp**, not through git: `*.pkl` stays ignored by choice.
+   It is a bundle, not a bare estimator — see "loading the artifact" at the end of §5,
+   and do not expect a plain `RandomForestClassifier` at the other end of the load.
 2. **Rewrite `webapp.py` for Python 3** around the explicit feature contract in §5.
-   Delete `features()` and `boxgen()` from the app and import the pipeline's versions
-   so there is exactly one definition of every feature.
+   Delete `features()` and `boxgen()` from the app and call `rebounding.serve.predict`
+   instead — it exists now, it is tested against the pipeline's own output, and it
+   leaves exactly one definition of every feature. See "the serving entry point" in §5.
 3. **Fix §3.4** (the transposed render) — one line, and it gates step 4.
 4. **Look at `posnn.h5` honestly, for the first time.** With the transpose fixed and
    the coordinate frame confirmed, run some real plays through it and watch. It may be
@@ -414,6 +509,8 @@ modelling work is actually left; 6 makes it honest.
 
 | what | where |
 |---|---|
+| **the serving entry point the app calls** | **`rebounding/serve.py::predict`** |
+| the deployable bundle, and `load` | `rebounding/models/artifact.py` |
 | feature definitions, regimes, slot ordering | `rebounding/data/features.py` |
 | the served feature list | `rebounding/data/features.py::SERVED_FEATURES` |
 | relative and shot-context features, and the fitted priors | `rebounding/data/derived.py` |
@@ -423,6 +520,7 @@ modelling work is actually left; 6 makes it honest.
 | baseline numbers reproduced | `python -m rebounding.cli baseline --forest` |
 | the same on the held-out test split | `python -m rebounding.cli baseline --on test` |
 | built training frame | `data/frame.parquet` (gitignored, rebuild with `cli build`) |
+| the shipped weights | `FinalModel.pkl` (gitignored by choice, built with `cli train`, deployed by scp) |
 
 One caveat worth carrying: the two data sources behind all of this now disagree on
 1.9% of rebounds — the NBA feed and Basketball-Reference credit some boards to
