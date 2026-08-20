@@ -53,6 +53,11 @@ def _synthetic_frame(seed: int = 0) -> pd.DataFrame:
             rebounder[offense_best] = 1
 
             angle = rng.uniform(-np.pi, np.pi, N_PLAYERS)
+            # Rim-time columns, so every regime -- not just the web app's -- is
+            # buildable from this fixture.
+            pos_distance = np.maximum(distance + rng.normal(0, 3, N_PLAYERS), 0.5)
+            move = rng.normal(0, 4, (N_PLAYERS, 2))
+            velocity = rng.normal(0, 3, (N_PLAYERS, 2))
             rows.append(
                 pd.DataFrame(
                     {
@@ -63,12 +68,21 @@ def _synthetic_frame(seed: int = 0) -> pd.DataFrame:
                         "pre_y": rng.uniform(0, 50, N_PLAYERS),
                         "pre_dist": distance,
                         "pre_angle": angle,
-                        "pre_vx": rng.normal(0, 3, N_PLAYERS),
-                        "pre_vy": rng.normal(0, 3, N_PLAYERS),
+                        "pre_vx": velocity[:, 0],
+                        "pre_vy": velocity[:, 1],
+                        "pre_speed": np.hypot(velocity[:, 0], velocity[:, 1]),
                         "pre_cos_shooter": np.cos(angle),
                         "pre_box": rng.integers(0, 3, N_PLAYERS).astype(float),
                         "pos_x": rng.uniform(0, 47, N_PLAYERS),
                         "pos_y": rng.uniform(0, 50, N_PLAYERS),
+                        "pos_dist": pos_distance,
+                        "pos_angle": rng.uniform(-np.pi, np.pi, N_PLAYERS),
+                        "pos_cos_shooter": np.cos(angle),
+                        "pos_box": rng.integers(0, 3, N_PLAYERS).astype(float),
+                        "move_dx": move[:, 0],
+                        "move_dy": move[:, 1],
+                        "move_dist": np.linalg.norm(move, axis=1),
+                        "closed_on_rim": np.where(pos_distance < distance, 1.0, -1.0),
                         "is_offense": is_offense,
                         "is_shooter": is_shooter,
                         "role": rng.integers(1, 6, N_PLAYERS).astype(float),
@@ -181,6 +195,21 @@ def test_train_only_fit_holds_out_val_as_well(frame_path):
     assert set(reproduction.metadata["scores"]) == {"val", "test"}
 
 
+def test_builds_the_source_of_truth_regime_too(frame_path):
+    """Three models, and this module has to be able to build more than the web app's."""
+    rich = build(
+        frame_path, regime="rim", model=BoostedSoftmax(n_estimators=15, learning_rate=0.2)
+    )
+    assert rich.regime == "rim"
+    assert "pos_x" in rich.features
+    assert len(rich.features) != 27
+
+
+def test_rejects_an_unknown_regime(frame_path):
+    with pytest.raises(ValueError, match="regime must be one of"):
+        build(frame_path, regime="wishful")
+
+
 def test_rejects_an_unknown_fit_split(frame_path):
     with pytest.raises(ValueError, match="fit_on must be one of"):
         build(frame_path, fit_on="everything")
@@ -231,4 +260,5 @@ def test_load_warns_when_the_package_has_drifted(built, tmp_path, caplog):
 
     with caplog.at_level("WARNING", logger=artifact_module.__name__):
         load(path)
-    assert "SERVED_FEATURES" in caplog.text
+    assert "artifact.features" in caplog.text
+    assert "served" in caplog.text

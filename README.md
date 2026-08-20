@@ -26,15 +26,21 @@ The 2017 pipeline was Python 2 and no longer ran; the 2020 port on `rewrite-pd` 
 abandoned half-finished. The extraction pipeline has been rebuilt as the
 `rebounding` package on Python 3, with the correctness problems described below
 fixed and a test suite over a committed sample game. The rebounder model has been
-rebuilt on top of it: 29.2% top-1 from the inputs the web app can actually supply,
-against 26.7% for the model family it replaces.
+rebuilt on top of it: 29.8% top-1 from the inputs the web app can actually supply,
+against 26.8% for the model family it replaces.
 
 **The rebounder is buildable in one command.** `python -m rebounding.cli train` fits
 it and writes `FinalModel.pkl` — the model, the fitted `ShotPriors`, the served
 feature list in fitted order, and the provenance to identify the file later. It takes
-about eighteen seconds. The shipping fit uses train+val and scores **30.1% top-1** on
+about eighteen seconds. The shipping fit uses train+val and scores **29.9% top-1** on
 the untouched test games; every ladder number below is the train-only fit, which is
 what keeps the regimes comparable.
+
+`--regime` picks which of the project's three models to build. `served` is the web
+app's, restricted to what the UI can supply; `all` is the feature-rich source of
+truth, which scores **37.9%** and which `rebounding.serve` refuses to serve because
+its features do not exist at prediction time. The movement model is the third and does
+not live here yet. The 8.0 points between those two is its budget.
 
 **The app calls one function.** `rebounding/serve.py::predict` takes ten placed
 positions, which team is attacking and who shot, and returns a probability per player
@@ -155,6 +161,40 @@ distance stated in the play-by-play text. On the sample game's 95 unblocked miss
 | original logic, ported as-is | 70 | 10.06 ft | 29% |
 | current | 78 | **1.31 ft** | **84%** |
 
+**Pairing on the game clock let shots span a dead ball.** This one was a fault in the
+*rebuilt* pipeline, not the old one, and it is the reason the corpus had a tail of
+impossible shots. Release candidates were bounded by 0.3–3.0 s of **game clock**, and
+the game clock stops: on a whistle, a timeout, a review. A release and a rim contact
+either side of a stoppage can be thirty seconds apart in real time while the clock
+shows two, so the bound accepted them and the shot was paired across the dead ball —
+with the "shooter" standing at the far end of the floor in a previous possession.
+
+Every pairing that put a shooter more than 60 ft from the rim was one of these. Over 90
+games there were 13 of them, median wall-clock flight **36 s**, which the play-by-play
+describes as layups and short jumpers from 1 to 26 ft. They were not full-court heaves;
+there are none in the corpus, because a buzzer miss is never credited a rebound and so
+never pairs.
+
+The moments already carry a wall-clock `Timestamp`, so the fix is to apply the same
+bound to real time (`MAX_WALL_FLIGHT_SECONDS`) and to derive `FlightTime` from it. The
+game-clock interval stays recoverable as `ReleaseClock - RimClock`. For 97.8% of shots
+the two agree within 0.1 s; where they disagree, the timestamp is the one telling the
+truth about how long the ball was in the air.
+
+| | before | after |
+|---|---|---|
+| shots in the corpus | 42,255 | 41,679 |
+| max shot distance | 95.5 ft | **62.0 ft** |
+| shooters > 60 ft | 118 | **2** |
+| shooters > 40 ft | 139 | 17 |
+
+940 shots are now dropped as `release_only_across_a_stopped_clock`; 576 of those had
+been reaching training, the rest were already being caught downstream by the
+substitution check. None were recovered — where the clock lies there is usually no
+valid alternative release, so the shot is dropped rather than repaired. Accuracy is
+unchanged within noise in every regime, which is the expected result for a fix that
+removes 1.4% of the data: it buys correctness, not points.
+
 **Other fixes.** 44% of shots lost their description, because only
 `HOMEDESCRIPTION` was kept. 11% of rebounds — the team rebounds — were silently
 discarded, biasing the training set toward clean uncontested boards. Transition
@@ -189,12 +229,12 @@ the table below is the single read on the held-out test split.
 
 | regime | what it knows | slot prior | nearest to rim | conditional logit | random forest | boosted softmax |
 |---|---|---|---|---|---|---|
-| **static** | ten positions | 23.8% | 23.2% | 26.1% | 26.7% | **27.5%** |
-| **served** | + derived features | 23.8% | 23.2% | 27.6% | 29.9% | 29.2% |
-| release | + real velocity | 23.8% | 23.2% | 26.9% | 28.9% | **28.5%** |
-| release+derived | both | 23.8% | 23.2% | 29.7% | 30.9% | **31.1%** |
-| rim | rim-time positions | 23.8% | 33.5% | 34.3% | 35.9% | **36.3%** |
-| all | everything | 23.8% | 33.5% | 35.6% | 38.2% | 38.0% |
+| **static** | ten positions | 24.0% | 23.2% | 26.4% | 26.8% | **27.6%** |
+| **served** | + derived features | 24.0% | 23.2% | 27.7% | 29.2% | **29.8%** |
+| release | + real velocity | 24.0% | 23.2% | 27.1% | 28.9% | 28.6% |
+| release+derived | both | 24.0% | 23.2% | 29.7% | **30.9%** | 30.8% |
+| rim | rim-time positions | 24.0% | 33.7% | 34.8% | 35.6% | **35.8%** |
+| all | everything | 24.0% | 33.7% | 35.9% | **37.7%** | 37.4% |
 
 `static` is what the web app can supply — a user places ten dots. `served` adds the
 derived features, which need nothing further from the user. The two rows below them
@@ -202,11 +242,11 @@ add a release velocity the app has no way to collect, and are there to price it.
 
 Four things fall out of this.
 
-**The servable model went from 26.7% to 29.2%** without asking the UI for anything new.
+**The servable model went from 26.8% to 29.8%** without asking the UI for anything new.
 Roughly a third of that is the model and two thirds the features; §*Where the gains
 came from* below splits it.
 
-**The train/serve gap is 7.1 points** (36.3% at rim time against 29.2% from what the
+**The train/serve gap is 6.0 points** (35.8% at rim time against 29.8% from what the
 app can supply). That is the entire budget a movement model has to earn back. It was
 8.2 points before this round of work and it shrinks every time the release-time model
 improves, which is worth stating plainly: effort spent on the rebounder and effort
@@ -215,13 +255,13 @@ cheaper of the two.
 
 **Nothing separates the top three models by much.** Boosted softmax, random forest and
 — with the derived features in hand — the conditional logit land within about 1.5
-points of each other, and the boosted model does not win every row. On 5,750
+points of each other, and the boosted model does not win every row. On 5,690
 validation shots an unpaired standard error is 0.6 points, so differences under about
 1.2 points are not distinguishable at all; the comparisons quoted below use a paired
 bootstrap over games, which is considerably tighter. The features moved the number.
 The model choice mostly did not.
 
-**The gap between top-1 and top-3 is large and stable** — 29.2% against 66.8% in the
+**The gap between top-1 and top-3 is large and stable** — 29.8% against 66.7% in the
 served regime. The model is ranking sensibly and failing to separate the leaders,
 which is what one would expect of an event with a genuinely random component. A tool
 that narrows ten players to three is right two times in three.
@@ -329,9 +369,9 @@ box-outs were unrepresentable.
 
 There is also a train/serve skew that no amount of movement-model quality fixes: the
 rebounder was trained and evaluated on ground-truth rim-time positions but served
-predicted ones. That skew is now measured rather than argued about — 7.1 points of
+predicted ones. That skew is now measured rather than argued about — 6.0 points of
 top-1 — and the honest headline number is accuracy **from what the app can supply**,
-29.2% for the train-only fit the ladder above compares and **30.1% for the weights
+29.8% for the train-only fit the ladder above compares and **29.9% for the weights
 that actually ship**, both on the same held-out test games.
 
 The rebounder half of the rebuild plan is done: the grouped softmax matches the
@@ -342,7 +382,7 @@ models consume a whole shot at once.
 
 What remains is the movement half: a scene-level conditional VAE with a
 set-transformer encoder, sampling coherent futures rather than one averaged guess. Two
-results above bear on it. Its accuracy budget is 7.1 points and shrinking, so it should
+results above bear on it. Its accuracy budget is 6.0 points and shrinking, so it should
 be justified as a UI feature — the predicted movement is what the app draws — rather
 than as an accuracy device; that argument is made in
 [`docs/webapp-handoff.md`](docs/webapp-handoff.md). And the fact that constant-velocity

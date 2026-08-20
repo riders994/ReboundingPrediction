@@ -7,11 +7,21 @@ import pytest
 from rebounding.data import pairing
 
 
-def _moments(quarters, clocks):
+def _moments(quarters, clocks, timestamps=None):
+    """Tracking moments. Timestamps default to a running clock, where the two agree.
+
+    Pass ``timestamps`` explicitly to build a *stopped* clock -- real time advancing
+    while the game clock does not, which is what happens across a whistle and what
+    `MAX_WALL_FLIGHT_SECONDS` exists to reject.
+    """
+    clocks = np.asarray(clocks, dtype=np.float32)
+    if timestamps is None:
+        timestamps = (clocks[0] - clocks) * 1000.0
     return pd.DataFrame(
         {
             "Quarter": np.asarray(quarters, dtype=np.int16),
-            "GameClock": np.asarray(clocks, dtype=np.float32),
+            "GameClock": clocks,
+            "Timestamp": np.asarray(timestamps, dtype=np.int64),
         }
     )
 
@@ -126,6 +136,47 @@ class TestFindRelease:
         moments = _moments([1, 1], [250.0, 249.8])
         assert pairing.find_release(moments, np.array([]), 1, ball, rim_dist) is None
 
+    def test_rejects_a_release_across_a_stopped_clock(self):
+        """The dominant mispairing: release and rim contact either side of a whistle.
+
+        The game clock moves 1.4 s across these frames, so the flight bound is happy.
+        Real time moves 40 s, which is the tell -- the "release" is a previous
+        possession at the other end of the floor.
+        """
+        z = [4.0, 3.0, 3.0, 8.0, 14.0, 16.0, 12.0, 9.5, 9.6, 10.2, 9.8]
+        ball, rim_dist = self._ball(z)
+        clocks = np.arange(11)[::-1] * 0.2 + 250
+
+        running = _moments([1] * 11, clocks)
+        assert pairing.find_release(running, np.array([2]), 10, ball, rim_dist) == 2
+
+        # Same clocks, but 40 real seconds elapse between frame 2 and frame 3.
+        stopped = (clocks[0] - clocks) * 1000.0
+        stopped[3:] += 40_000
+        assert (
+            pairing.find_release(_moments([1] * 11, clocks, stopped),
+                                 np.array([2]), 10, ball, rim_dist)
+            is None
+        )
+
+    def test_counts_a_stopped_clock_rejection_separately(self):
+        """"Nothing was plausible" and "the only candidate was a whistle away" differ."""
+        from collections import Counter
+
+        z = [4.0, 3.0, 3.0, 8.0, 14.0, 16.0, 12.0, 9.5, 9.6, 10.2, 9.8]
+        ball, rim_dist = self._ball(z)
+        clocks = np.arange(11)[::-1] * 0.2 + 250
+        stopped = (clocks[0] - clocks) * 1000.0
+        stopped[3:] += 40_000
+
+        drops = Counter()
+        pairing.find_release(
+            _moments([1] * 11, clocks, stopped), np.array([2]), 10, ball, rim_dist,
+            drops=drops,
+        )
+        assert drops[pairing.DROP_STOPPED_CLOCK] == 1
+        assert drops[pairing.DROP_NO_RELEASE] == 0
+
 
 class TestPairOnRealGame:
     """End-to-end against the sample game. Numbers are measured, see the module docstring."""
@@ -153,7 +204,19 @@ class TestPairOnRealGame:
     def test_flight_times_are_physically_plausible(self, result):
         paired, _ = result
         assert (paired["FlightTime"] > 0).all()
-        assert (paired["FlightTime"] <= pairing.MAX_FLIGHT_SECONDS).all()
+        assert (paired["FlightTime"] <= pairing.MAX_WALL_FLIGHT_SECONDS).all()
+
+    def test_flight_time_is_wall_clock_not_game_clock(self, result):
+        """The ball does not stop when the clock does, so the timestamp is the truth.
+
+        The game-clock interval stays recoverable from the two clock columns, which is
+        what lets anything downstream notice the two disagreeing.
+        """
+        paired, _ = result
+        clock_flight = paired["ReleaseClock"] - paired["RimClock"]
+        assert (paired["FlightTime"] >= clock_flight - 0.5).all()
+        # On a running clock the two agree closely; this fixture has no stoppages.
+        assert (paired["FlightTime"] - clock_flight).abs().max() < 1.0
 
     def test_each_rim_arrival_is_used_at_most_once(self, result):
         paired, _ = result

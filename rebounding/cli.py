@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from rebounding.data import build, sportvu
+from rebounding.data.features import FEATURE_REGIMES
 from rebounding.models import artifact
 
 
@@ -69,14 +70,20 @@ def _train(args: argparse.Namespace) -> int:
         print(f"no frame at {args.frame}; run `build --out {args.frame}` first", file=sys.stderr)
         return 1
 
-    built = artifact.build(args.frame, fit_on=args.fit_on)
-    path = artifact.save(built, args.out)
+    built = artifact.build(args.frame, fit_on=args.fit_on, regime=args.regime)
+    out = args.out or (
+        artifact.DEFAULT_OUTPUT if args.regime == "served" else Path(f"{args.regime}-model.pkl")
+    )
+    path = artifact.save(built, out)
     print(built.describe())
     print()
     print(f"wrote {path} ({path.stat().st_size / 1e6:.2f} MB)")
     # The weights are gitignored by choice, so the only record of what shipped is the
     # file itself. Say where it has to go rather than leaving it in the working tree.
-    print(f"scp it to the web app host; `describe --model {path}` prints this block again")
+    if args.regime == "served":
+        print(f"scp it to the web app host; `describe --model {path}` prints this block again")
+    else:
+        print(f"reference model, not servable; `describe --model {path}` prints this block again")
     return 0
 
 
@@ -167,14 +174,28 @@ def main(argv: list[str] | None = None) -> int:
     train_cmd.add_argument("--frame", default="data/frame.parquet", help="parquet from `build`")
     train_cmd.add_argument(
         "--out",
-        default=str(artifact.DEFAULT_OUTPUT),
-        help="where to write the bundle; gitignored by design and deployed by scp",
+        default=None,
+        help=(
+            "where to write the bundle; gitignored by design and deployed by scp. "
+            f"Defaults to {artifact.DEFAULT_OUTPUT} for the served regime, "
+            "<regime>-model.pkl otherwise"
+        ),
     )
     train_cmd.add_argument(
         "--fit-on",
         default="train+val",
         choices=list(artifact.FIT_CHOICES),
         help="train+val is the shipping fit; train reproduces the README ladder",
+    )
+    train_cmd.add_argument(
+        "--regime",
+        default="served",
+        choices=sorted(FEATURE_REGIMES),
+        help=(
+            "which of the models to build: 'served' is the web app's, restricted to what "
+            "the UI can supply; 'all' or 'rim' is the feature-rich source of truth, which "
+            "cannot be served"
+        ),
     )
     train_cmd.set_defaults(func=_train)
 

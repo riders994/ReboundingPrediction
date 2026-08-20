@@ -26,6 +26,20 @@ module-level ``grouped_softmax_objective`` by import path, so unpickling imports
 The handoff brief already has the app importing this package's feature code rather
 than retyping it, so this adds no dependency that was not already required.
 
+**Three models, three regimes.** This module builds any of them; which one it is
+depends on ``regime``:
+
+* the **source of truth** -- as feature-rich as the corpus allows, including rim-time
+  positions and velocity. ``regime="all"``, or ``"rim"`` for the positional ceiling.
+  It is a reference, not a product: :mod:`rebounding.serve` refuses to serve it,
+  because none of those features exist when a user is placing dots.
+* the **web app model** -- restricted to what the UI can supply. ``regime="served"``
+  today, and static-only by necessity rather than by design: once a movement model
+  exists, its predicted rim-time positions unlock the ``pos_*`` and ``move_*``
+  families for this model too, and the regime grows to match.
+* the **movement model** itself is not built here. It has a different shape --
+  positions to positions, not players to a probability.
+
 Fitting the shipped model on ``train+val`` is the default. Hyperparameters were chosen
 on the validation split, so once that choice is made, holding those 95 games out of
 the final fit costs data for nothing. The test split stays untouched either way, and
@@ -49,7 +63,7 @@ import numpy as np
 import pandas as pd
 
 from rebounding.data.derived import ShotPriors
-from rebounding.data.features import SERVED_FEATURES, to_tensor
+from rebounding.data.features import FEATURE_REGIMES, to_tensor
 from rebounding.eval.metrics import Scores, evaluate
 from rebounding.eval.split import split_by_game
 from rebounding.models.boosted import BoostedSoftmax
@@ -189,9 +203,11 @@ def build(
     """
     if fit_on not in FIT_CHOICES:
         raise ValueError(f"fit_on must be one of {FIT_CHOICES}, got {fit_on!r}")
+    if features is None and regime not in FEATURE_REGIMES:
+        raise ValueError(f"regime must be one of {sorted(FEATURE_REGIMES)}, got {regime!r}")
 
     frame_path = Path(frame_path)
-    features = list(features or SERVED_FEATURES)
+    features = list(features if features is not None else FEATURE_REGIMES[regime])
     split = split_by_game(pd.read_parquet(frame_path))
 
     fit_rows = pd.concat([split.train, split.val]) if fit_on == "train+val" else split.train
@@ -262,10 +278,11 @@ def load(path: str | Path = DEFAULT_OUTPUT) -> ModelArtifact:
     # The artifact's own list is authoritative -- it is the order the trees were fitted
     # in. A drifted package is the thing worth shouting about, because the failure is
     # silent: every feature still has a value, just the wrong one.
-    if artifact.regime == "served" and artifact.features != SERVED_FEATURES:
+    expected = FEATURE_REGIMES.get(artifact.regime)
+    if expected is not None and artifact.features != expected:
         LOGGER.warning(
-            "%s was fitted on a different feature list than this package's SERVED_FEATURES; "
-            "serve artifact.features (%d columns), not the imported list (%d)",
-            path, len(artifact.features), len(SERVED_FEATURES),
+            "%s was fitted on a different feature list than this package's %r regime; "
+            "use artifact.features (%d columns), not the imported list (%d)",
+            path, artifact.regime, len(artifact.features), len(expected),
         )
     return artifact
