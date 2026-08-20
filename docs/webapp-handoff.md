@@ -283,9 +283,16 @@ top-1, phrased as "picks the right rebounder just under 3 times in 10".
 ### The movement model stays — it is a product feature, not an accuracy device
 
 The app's whole interaction is: place ten players at release, press Run, watch what
-happens. The predicted movement **is** the thing being shown. So `posnn.h5` (or its
-replacement) is required regardless of what it does for accuracy, and the Keras
-dependency stays in the stack either way.
+happens. The predicted movement **is** the thing being shown. So the movement model is
+required regardless of what it does for accuracy.
+
+**This section's recommendation has since been confirmed by measurement, and the
+heading is now literally true rather than a judgement call.** `posnn.h5` has been
+replaced by a set transformer (see the parent repo's README, *The movement model*), and
+the replacement was fed back to the rebounder exactly as Decision A below imagines. It
+is worth **0.1 points of top-1** against an 8.1-point oracle budget. Read the rest of
+this section as the argument that turned out to be right; the numbers in it are the
+older, smaller estimates.
 
 That reframes it rather than removing it. Two decisions that look like one:
 
@@ -318,9 +325,19 @@ The current movement model is biased in a known
 direction, so feeding its output to the rebounder plausibly scores *below* the 29.2%
 that ignoring it entirely gets. **Recommendation: run the rebounder on release-time
 features**, and let the movement model drive the animation beside it rather than
-upstream of it. If a later movement model measurably beats release-time features on
-held-out data, move it back into the path then — that is a one-line swap, and §7 step 4
-is where to test it.
+upstream of it.
+
+*Settled, 2026-08-20.* The replacement movement model was built and the swap measured
+properly — the rebounder trained on its *predictions* rather than on rim-time truth,
+which is the only version of the experiment worth running. On the test split: 30.0%
+from release-time features, 30.1% with the movement model's rim-time columns added,
+29.8% marginalising over sixteen sampled scenes, and 38.1% from rim-time truth. The
+forecast captures roughly one percent of its own budget, and a "stay put" control scores
+29.7%, so the extra columns are not carrying anything on their own either. The reading
+that survives every control: the predictable part of a player's next 1.9 seconds is the
+part already implied by where everyone is standing, which the rebounder can see for
+itself. **Serve `FinalModel.pkl` on `SERVED_FEATURES` and animate beside it.** The
+`served+movement` regime exists, works, and is not worth deploying.
 
 **Decision B — the quality bar for the movement model.** This is where it gets more
 demanding, not less. As a hidden intermediate, a mediocre movement model costs a few
@@ -350,6 +367,14 @@ is what produces the drift. Judge it on whether real rim-time positions fall ins
 predicted distribution (calibration), and on whether sampled scenes are physically
 plausible: no overlapping players, speeds within human range, box-out relationships
 preserved.
+
+*Built, 2026-08-20.* That is now `rebounding/eval/movement.py`, and both predictions in
+this subsection held. Trained on L2, the same network sends defenders rimward on 84.4%
+of shots against a real 69.0% and produces 40% more player collisions than the corpus
+contains — the drift and the overlap, exactly as described. Changing only the loss to a
+density removes both. The deployed head samples whole scenes from a per-scene latent and
+lands on 0.56 collisions per scene against the corpus's 0.55; "no overlapping players"
+turned out to be the metric the scene latent actually earns its place on.
 
 ### The feature contract
 
@@ -496,6 +521,59 @@ tensor path exactly. There is no train/serve skew left in the feature layer.
 one shot from the command line, which is the quickest way to confirm a freshly scp'd
 artifact works on the host before pointing the app at it.
 
+### The movement entry point — `posnn.h5` is retired
+
+The movement model has been rebuilt and ships the same way the rebounder does:
+
+```bash
+python -m rebounding.cli train-movement --out MovementModel.pkl   # in this repo
+scp MovementModel.pkl <host>:<app dir>/                           # alongside FinalModel.pkl
+```
+
+```python
+from rebounding.models.artifact import load_movement
+from rebounding.serve import animate
+
+movement = load_movement("MovementModel.pkl")
+result = animate(movement, players, n=12)   # same ten dicts `predict` takes
+
+result.scenes      # (12, 10, 2) sampled futures, indexed as `players` was
+result.scene(0)    # one of them, (10, 2)
+result.mean        # the conditional mean. For the rebounder. Do not draw it.
+```
+
+Four things follow, and the first is the one that changes the front end:
+
+- **It returns several futures, not one.** The model predicts a distribution over
+  whole scenes. `scenes` is that distribution sampled, and each draw is internally
+  consistent — one latent commits all ten players at once, so a sampled scene is a
+  scenario rather than ten independent guesses.
+- **Do not average the scenes before drawing them.** That collapses the model back to
+  the point estimate it replaced, and the point estimate is what put every player in
+  the paint. Animate one draw; fan the rest out as ghosts if you want to show the
+  spread. `mean` exists for the rebounder's features and for tests.
+- **`msd.pkl` is gone.** The normalisation constants are buffers inside the network,
+  so they cannot drift away from the weights they belong to. So is TensorFlow: the
+  bundle is a torch state dict, and the CPU wheel is the right one to install — this
+  is a small model over ten tokens and a request is one forward pass.
+- **It eats `SERVED_FEATURES`**, exactly as the rebounder does. There is no second
+  input contract to reproduce, no 41.65 hoop, no swapped `arctan2`. Everything §3 said
+  about the 2017 eight-column input is now historical.
+
+To fold it back into the rebounder as well, build the `served+movement` regime:
+
+```bash
+python -m rebounding.cli train --regime served+movement --movement MovementModel.pkl
+```
+
+and pass the movement bundle to `predict(artifact, players, movement=movement)`. An
+artifact that wants those ten columns without one **raises** rather than defaulting,
+for the same reason a velocity-hungry artifact does. Note what that build does with
+the training rows: it generates their rim-time columns from the movement model's
+*predictions*, never from the corpus's real `pos_*`. Training on truth and serving
+forecasts is precisely the skew that produced the 2017 number, and `cli baseline`
+now refuses this regime outright rather than fitting it off the frame.
+
 ---
 
 ## 6. Deployment
@@ -526,13 +604,16 @@ artifact works on the host before pointing the app at it.
 3. ~~**Fix §3.4**~~ **Do not.** That section has been withdrawn: the assignment it
    flags is a coordinate-frame conversion, not a transposition, and reversing it breaks
    the render. Nothing gates step 4 any more.
-4. **Look at `posnn.h5` honestly, for the first time.** Nothing blocks this now: the
-   coordinate frame is settled (§3.5) and there was never a transpose to fix. Run real
-   plays through it and watch. It may be adequate as a visual, or the paint-drift may be
-   obvious on sight. That observation decides whether the CVAE rebuild is urgent or can
-   wait. Note that the app has to load it first — `webapp_port/movement.py` reproduces
-   its 2017 input contract but has never been run against the real weights, because
-   there is no TensorFlow in the parent repo's environment.
+4. ~~**Look at `posnn.h5` honestly**~~ **Superseded — it has been replaced.** The
+   question that step asked was whether the 2017 movement model's paint-drift was bad
+   enough to justify a rebuild. It was not answerable as written (there is no
+   TensorFlow in the parent repo's environment, and a 2017 Keras HDF5 may not load in
+   current Keras at all), and it is now moot: the model has been retrained as a set
+   transformer over the ten players, and the drift was measured on the *new* model's
+   own point-estimate head rather than guessed at from the old one's animation. See
+   "the movement entry point" in §5 for the API and the parent repo's README for the
+   numbers. What is left on the front end is drawing the sampled scenes rather than
+   one dot.
 5. ~~**Confirm the coordinate frame**~~ **Done** (§3.5). The canvas is the basket half
    with the basket at the bottom, so screen-down is model `x`; SportVU's bird's-eye view
    and the rotational fold settle the width axis. Neither flip is set, and mirroring the
@@ -540,8 +621,8 @@ artifact works on the host before pointing the app at it.
 6. **Correct the accuracy copy** (§4).
 7. **Deploy under gunicorn** (§6).
 
-Steps 1–2 make the app runnable; 3 and 5 make it correct; 4 tells you how much
-modelling work is actually left; 6 makes it honest.
+Steps 1–2 make the app runnable; 3 and 5 make it correct; 4 is done and its output is
+a second bundle to scp; 6 makes it honest.
 
 ---
 

@@ -39,8 +39,15 @@ what keeps the regimes comparable.
 `--regime` picks which of the project's three models to build. `served` is the web
 app's, restricted to what the UI can supply; `all` is the feature-rich source of
 truth, which scores **37.8%** and which `rebounding.serve` refuses to serve because
-its features do not exist at prediction time. The movement model is the third and does
-not live here yet. The 8.0 points between those two is its budget.
+its features do not exist at prediction time. The 8.0 points between those two is the
+budget for the third model.
+
+**The movement model now lives here too.** `python -m rebounding.cli train-movement`
+writes `MovementModel.pkl` — a set transformer over the ten players that predicts where
+they will be when the ball reaches the rim, and the replacement for the 2017 `posnn.h5`.
+It is a *generative* model: it samples whole coherent scenes rather than predicting one
+position per player, which is what the app should draw and what the old one could not
+do. See *The movement model* below for what that changed and what it did not.
 
 **The app calls one function.** `rebounding/serve.py::predict` takes ten placed
 positions, which team is attacking and who shot, and returns a probability per player
@@ -52,10 +59,12 @@ is now exactly one definition of every feature, and it lives here.
 and `*.h5`, and the artifact reaches the web app host by scp rather than through git.
 That is a choice this time rather than the accident that lost the 2017 model, and it
 is why the bundle carries its own provenance: `cli describe --model FinalModel.pkl`
-answers "which model is on the box?" from the file itself. The movement model
-(`posnn.h5`) and its normaliser (`msd.pkl`) survive only in the companion web app repo,
-[riders994/ReboundWebApp](https://github.com/riders994/ReboundWebApp). Rebuilding that
-half is the next phase.
+answers "which model is on the box?" from the file itself. `MovementModel.pkl` ships the
+same way and answers the same question. The 2017 movement model (`posnn.h5`) and its
+normaliser (`msd.pkl`) survive only in the companion web app repo,
+[riders994/ReboundWebApp](https://github.com/riders994/ReboundWebApp), and are now
+superseded rather than needed — the replacement carries its normalisation inside the
+bundle, so there is no second file to keep in step with the weights.
 
 ## Data
 
@@ -342,6 +351,146 @@ about four tenths of a second of movement and nothing after that, because what a
 player does next is dominated by an intention his current heading does not reveal.
 That is the strongest argument in this repo for a generative scene model over a
 kinematic one, and equally the reason no cheap version of one will do.
+
+### The movement model
+
+The third of the three, and the one that had the most room in it. It predicts where the
+ten players will be when the ball reaches the rim, from where they were at release —
+which is both the app's whole interaction (place ten dots, press run, watch) and the
+feeder for the `served+movement` regime. `python -m rebounding.cli train-movement` fits
+it and writes `MovementModel.pkl`.
+
+**It is a set model, and the set part is not decoration.** Ten players with no natural
+order, whose interaction *is* the phenomenon — a box-out is a pairwise relation, and a
+model that sees one player at a time cannot represent one. The encoder is four
+self-attention layers with no positional encoding, so it is permutation equivariant by
+construction: hand the players over in any order and the predictions follow them. The
+canonical slot order is a tensor-layout convenience, not information this model is
+allowed to lean on, and there is a test that says so.
+
+**What broke the 2017 version was the loss, not the architecture.** An offensive player
+fourteen feet out either crashes the glass or leaks out in transition; over the training
+games offence closes on the rim 45.7% of the time, and inside a single starting band the
+change in rim distance runs from −12.5 ft at the 5th percentile to +12.6 ft at the 95th.
+Squared error on a target like that returns the conditional mean, which is neither
+future. So the same encoder carries three interchangeable heads, and the comparison
+isolates the objective rather than the network:
+
+| head | what it predicts | error | minADE player/scene | cov50 | cov90 | contacts | crash off/def |
+|---|---|---|---|---|---|---|---|
+| *truth* | *what happened* | — | — | — | — | 0.55 | 44.8% / 69.0% |
+| *stay put* | *nothing moves* | 7.52 ft | 7.52 / 7.52 | 0% | 0% | 0.41 | 0% / 0% |
+| *damped velocity* | *straight lines* | 6.25 ft | 6.25 / 6.25 | 0% | 0% | 0.52 | 51.0% / 58.4% |
+| `point` | one displacement, L2 | 5.01 ft | 5.01 / 5.01 | 0% | 0% | 0.77 | 50.8% / 84.4% |
+| `mixture` | 6 Gaussians per player, NLL | **4.88 ft** | **1.78** / 4.73 | 44.0% | 82.4% | 0.65 | 44.9% / 69.6% |
+| `cvae` | one latent per scene, ELBO | 4.94 ft | 1.88 / 4.83 | **47.0%** | **83.1%** | **0.56** | 46.3% / 70.2% |
+
+Test split, 5,756 shots, 20 samples each. `contacts` is pairs of players inside two feet
+of each other per scene, and the row to compare it against is *truth*, not zero — real
+basketball has contact. `cov50`/`cov90` should read 50% and 90% for a calibrated model.
+The damped-velocity row is a reference and not a candidate: it needs a release velocity
+the web app has no way to collect.
+
+Four readings.
+
+**The architecture pays for itself before any head does.** `point` is the 2017 shape and
+lands 5.01 ft from the truth *using no velocity at all*, against 6.25 ft for
+extrapolating a damped real one. Players travel 7.52 ft over a flight, so staying put
+costs 7.52 ft and this is a real reduction rather than a shrunken guess.
+
+**And it drifts, exactly where the argument says it will.** `point` sends defenders
+rimward on 84.4% of shots against a real 69.0%, and produces 40% more player collisions
+than the corpus contains. That is a model averaging two opposite intentions, and it is
+the failure a user watches happen rather than one that shows up in a table.
+
+**Changing only the objective fixes the drift.** `mixture` is the same encoder with a
+six-component Gaussian mixture per player and an exact likelihood; its crash rates land
+on the real ones. Its minADE tells the other half: among twenty draws one lands 1.78 ft
+from the truth *per player* but 4.73 ft *per scene*, because nothing couples one
+player's choice of component to another's. Ten individually plausible players; no
+coherent arrangement.
+
+**The scene latent buys plausibility, not accuracy — which was not the prediction.**
+`cvae` was expected to close that per-player/per-scene gap and does not (1.88 / 4.83, a
+shade worse than `mixture` on both). What it does deliver is the thing that is visible
+on screen: **0.56 contacts per scene against the corpus's 0.55**, the best of any head,
+and the best calibration. Diagnosing why gives the reason and the fix — the latent is
+only carrying 15.4% of the sample variance, with 12 of its 16 dimensions collapsed to
+the prior, because the KL term makes independent per-player noise the cheaper way to
+explain the data. The coupling it does produce is real: the ten players' latent-driven
+deviations correlate at 0.425. There is simply not enough of it.
+
+Loosening the KL term is the obvious fix for that collapse and it does not work.
+Refitting the same head at `kl_weight` 0.2, on validation:
+
+| variant | error | minADE player/scene | cov50 | contacts | crash off/def |
+|---|---|---|---|---|---|
+| *truth* | — | — | — | 0.58 | 45.8% / 69.3% |
+| `cvae`, default | 4.90 ft | 1.89 / **4.82** | 46.8% | 0.56 | 46.2% / 70.2% |
+| `cvae`, `kl_weight=0.2` | 5.80 ft | 2.21 / 5.53 | 47.5% | 0.52 | 44.8% / 64.9% |
+
+Giving the latent more room *widened* the per-scene gap rather than closing it, cost
+0.9 ft of accuracy, and pushed the defensive crash rate below the real one. Recorded so
+nobody retries it — with the caveat that it stopped at epoch 118 of 120 and had not
+plateaued, so some of that is undertraining rather than the weight being wrong. If the
+scene gap is worth another attempt, the thing to change is the decoder rather than the
+weight: most of the sampled spread is its independent per-player sigma, and a decoder
+that had to route more of the variance through the shared latent would be a sharper
+test than annealing the penalty in front of it.
+
+#### What it is worth to the rebounder: almost nothing, and that is the finding
+
+The movement model was meant to have a second job. The `served+movement` regime feeds
+its predicted rim-time positions back to the rebounder as ten extra columns, and the
+gap between what the app can supply and rim-time truth was supposed to be the budget it
+would earn back. Fitting all of it — the rebounder trained on the movement model's
+*predictions*, never on the corpus's real `pos_*`, because training on truth and serving
+forecasts is the skew that produced 2017's 86%:
+
+| what the rebounder eats | val | test |
+|---|---|---|
+| release only (`SERVED_FEATURES`) | 28.9% | 30.0% |
+| + rim-time columns from "stay put" | 28.8% | 29.7% |
+| + rim-time columns from the movement model | 29.9% | **30.1%** |
+| + the same, marginalised over 16 sampled scenes | 29.5% | 29.8% |
+| + rim-time columns from **truth** | 37.4% | **38.1%** |
+
+Read the test column; the validation column is the movement model's own early-stopping
+set and is not clean for it. The release-only row is refitted here rather than copied
+from the ladder above, and lands at 30.0% against that table's 29.8% — LightGBM under
+`n_jobs=-1` is not bit-reproducible, and 0.2 points is well inside the 0.6-point
+standard error. All five rows share the settings, which is what the comparison needs. Knowing where the ten players actually end up is worth
+**8.1 points**. The best forecast of where they will end up is worth **0.1**. The
+movement model captures about one percent of its own budget.
+
+That is not a bug in the forecast. The "stay put" row is the control and shows the ten
+extra columns carry nothing on their own; the movement model's columns are genuinely
+better than that and still buy nothing. Nor is it over-smoothing: sampled scenes have
+realistic spread — that is what the calibration and contact numbers above establish —
+and marginalising over them scores *worse*, not better. The reading that survives is
+that the predictable part of a player's next 1.9 seconds is not the part that decides
+the rebound. What the model gets right is the part that was already implied by where
+everyone was standing, which the rebounder could see for itself; what decides the board
+is the residual, and the residual is what "unpredictable" means.
+
+So the recommendation in `docs/webapp-handoff.md` §5 stands, and now has a measurement
+under it rather than a caution: **run the rebounder on release-time features, and let
+the movement model drive the animation beside it rather than upstream of it.** It is a
+product feature. It is not an accuracy device, and this is what it cost to find out.
+
+**Score it on none of this by accident.** `rebounding/eval/movement.py` reports mean
+displacement error and never optimises against it, because that metric is what produced
+the drift. What it tunes on instead: whether the truth falls inside the predicted
+distribution, whether sampled scenes are physically possible — collisions and implied
+speeds, measured against the same statistics computed on real rim-time frames — and
+whether the model reproduces the crash rate rather than averaging over it.
+
+**Hardware was never the constraint, and in 2017 it was not the missing piece either.**
+Everything above is three models trained on a 2019 laptop CPU with no GPU, over 26,733
+training shots of ten players; the longest run was 60 minutes and most of that was
+contention. What was actually missing in 2017 was permutation-equivariant layers, which
+arrived that year and were not yet usable, and a density head — which existed, and was
+not reached for.
 
 ### Out of scope on purpose: who the players are
 
