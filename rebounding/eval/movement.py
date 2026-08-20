@@ -33,17 +33,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from rebounding.constants import HOOP
+from rebounding.constants import CONTACT_FEET, HOOP, MAX_SPEED_FPS
 
 N_PLAYERS = 10
-
-# Two players closer than this are effectively occupying one body. Chosen from the
-# corpus rather than from anatomy: at rim time only 0.6% of real pairs are inside it.
-CONTACT_FEET = 2.0
-
-# Sustained speeds above this do not occur in the corpus, so a sample that needs one
-# is a sample of something that cannot happen.
-MAX_SPEED_FPS = 22.0
 
 
 def _norm(delta: np.ndarray) -> np.ndarray:

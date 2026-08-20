@@ -552,6 +552,13 @@ Four things follow, and the first is the one that changes the front end:
   the point estimate it replaced, and the point estimate is what put every player in
   the paint. Animate one draw; fan the rest out as ghosts if you want to show the
   spread. `mean` exists for the rebounder's features and for tests.
+- **Every returned scene is physically possible, and that is not free.** The decoder
+  is Gaussian, so its support is unbounded and a thin tail of draws asks a player to
+  cross the court in a second and a half — 0.16% of scenes against the predicted
+  flight time. `animate` redraws those before returning them, and reports what it had
+  to do as `result.redrawn` and `result.clamped`. Both are normally 0; a placement
+  that pushes them up is one the model finds strange, which is worth surfacing rather
+  than hiding. Nothing is needed on the front end for this.
 - **`msd.pkl` is gone.** The normalisation constants are buffers inside the network,
   so they cannot drift away from the weights they belong to. So is TensorFlow: the
   bundle is a torch state dict, and the CPU wheel is the right one to install — this

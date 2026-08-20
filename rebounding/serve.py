@@ -38,6 +38,7 @@ smoke alarm rather than a proof. Confirm handedness once with
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -45,7 +46,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from rebounding.constants import COURT_WIDTH, DEFAULT_POSITION, HALF_COURT_X, POSITION_MAP
+from rebounding.constants import (
+    COURT_WIDTH,
+    DEFAULT_POSITION,
+    HALF_COURT_X,
+    MAX_SPEED_FPS,
+    POSITION_MAP,
+)
 from rebounding.data.court import fold, rim_angle, rim_distance
 from rebounding.data.derived import VELOCITY_DERIVED
 from rebounding.data.features import MOVEMENT_SUPPLIED, N_PLAYERS, TEAM_SIZE, boxgen
@@ -259,6 +266,8 @@ class MovementPrediction:
     mean: np.ndarray
     slots: np.ndarray
     features: pd.DataFrame
+    redrawn: int = 0
+    clamped: int = 0
 
     def scene(self, index: int = 0) -> np.ndarray:
         """One sampled future, ``(10, 2)``, indexed as the caller's list was."""
@@ -270,6 +279,67 @@ def _served_tensor(artifact, frame: pd.DataFrame, wanted: Sequence[str]) -> np.n
     if missing:
         raise PlacementError(f"could not build {missing} for this artifact")
     return frame[list(wanted)].to_numpy(dtype=np.float32).reshape(1, N_PLAYERS, len(wanted))
+
+
+# Extra rounds of sampling allowed before a still-impossible scene is clamped instead
+# of redrawn. Three rounds takes the per-scene reject rate from about 1% to a part in
+# a million, and the clamp is there so the function cannot loop on a pathological
+# placement rather than because it is expected to fire.
+_MAX_REDRAWS = 3
+
+
+def _implied_speed(scenes: np.ndarray, release: np.ndarray, flight: float) -> np.ndarray:
+    """Feet per second each player would need, ``(n, 10)``."""
+    return np.linalg.norm(scenes - release, axis=-1) / max(flight, 1e-6)
+
+
+def _reject_impossible(
+    sampler, scenes: np.ndarray, release: np.ndarray, flight: float
+) -> tuple[np.ndarray, int, int]:
+    """Redraw scenes that need a player to outrun the corpus, then clamp the rest.
+
+    The decoder is Gaussian and its support is unbounded, so a small tail of draws
+    puts a player somewhere no basketball player could reach. The body of the
+    distribution is right -- median implied speed matches the corpus at 3.5 ft/s, and
+    p99 is 14.8 against the corpus's 12.0 -- so this is a tail to cut, not a
+    calibration to fix.
+
+    How big the tail is depends on which flight time divides the displacement, and
+    the two answers are both real:
+
+    * against ``flight_hat``, which is all the app ever has, **0.16% of sampled
+      scenes** carry at least one impossible player. Filtering 800 test shots at 20
+      scenes each took that to 0.00%, on 27 redraws and a single clamp.
+    * against the corpus's true ``FlightTime``, 1.06%. Higher because a real flight
+      can be 0.32 s on a tip-in and ``flight_hat`` bottoms out at 0.84 s -- the
+      regression cannot predict a putback, so it never asks for the speed one needs.
+
+    This function uses ``flight_hat`` because that is the number the app has at
+    serving time. :mod:`rebounding.eval.movement` scores against the real one, which
+    is the stricter and correct choice for grading the model.
+
+    It is cut *here* rather than in
+    :meth:`~rebounding.models.artifact.MovementArtifact.sample_positions` on purpose.
+    ``sample_positions`` is what :mod:`rebounding.eval.movement` scores, and a model
+    that is graded through its own filter cannot be caught doing this. The app draws
+    filtered scenes; the metrics stay honest about the model underneath.
+    """
+    redrawn = clamped = 0
+    for _ in range(_MAX_REDRAWS):
+        bad = (_implied_speed(scenes, release, flight) > MAX_SPEED_FPS).any(axis=-1)
+        if not bad.any():
+            return scenes, redrawn, clamped
+        redrawn += int(bad.sum())
+        scenes[bad] = sampler(int(bad.sum()))
+
+    # Whatever is left keeps its heading and loses the distance it cannot cover.
+    speed = _implied_speed(scenes, release, flight)
+    over = speed > MAX_SPEED_FPS
+    if over.any():
+        clamped = int(over.sum())
+        scale = np.where(over, MAX_SPEED_FPS / np.maximum(speed, 1e-6), 1.0)
+        scenes = release + (scenes - release) * scale[..., None]
+    return scenes, redrawn, clamped
 
 
 def animate(
@@ -288,13 +358,32 @@ def animate(
     Sampling ``n`` scenes and drawing them is the intended use. A generative model
     that gets averaged back down to one dot before it reaches the screen has had its
     only advantage discarded on the last step.
+
+    Scenes that would need a player to move faster than the corpus ever does are
+    redrawn before they are returned -- see :func:`_reject_impossible`. ``redrawn``
+    and ``clamped`` on the result report how much of that happened, so a placement
+    that provokes it is visible rather than silently smoothed.
     """
     frame = feature_frame(players, basket=basket)
     enriched = movement.priors.transform(frame)
     x = _served_tensor(movement, enriched, movement.features)
     release = enriched[["pre_x", "pre_y"]].to_numpy(dtype=float).reshape(1, N_PLAYERS, 2)
 
+    # The flight this shot is predicted to have, which is what turns a displacement
+    # into a speed. One value per shot; every row of a shot carries the same one.
+    flight = float(enriched["flight_hat"].iloc[0])
+
+    draws = itertools.count(0 if seed is None else seed + 1)
+
+    def sampler(count: int) -> np.ndarray:
+        """More scenes, on a fresh seed so a redraw cannot repeat the rejected one."""
+        next_seed = None if seed is None else next(draws)
+        return movement.sample_positions(x, release, n=count, seed=next_seed)[:, 0]
+
     by_slot_scenes = movement.sample_positions(x, release, n=n, seed=seed)[:, 0]
+    by_slot_scenes, redrawn, clamped = _reject_impossible(
+        sampler, by_slot_scenes, release[0], flight
+    )
     by_slot_mean = movement.predict_positions(x, release)[0]
 
     input_index = enriched["InputIndex"].to_numpy(dtype=int)
@@ -305,7 +394,10 @@ def animate(
 
     slots = np.empty(len(input_index), dtype=int)
     slots[input_index] = enriched["Slot"].to_numpy(dtype=int)
-    return MovementPrediction(scenes=scenes, mean=mean, slots=slots, features=enriched)
+    return MovementPrediction(
+        scenes=scenes, mean=mean, slots=slots, features=enriched,
+        redrawn=redrawn, clamped=clamped,
+    )
 
 
 def predict(

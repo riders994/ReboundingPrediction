@@ -413,3 +413,79 @@ def test_the_movement_columns_reach_the_rebounder(rows, priors):
         prediction.features["pre_x"].to_numpy(float) - 1.0,
     )
     np.testing.assert_allclose(prediction.features["move_dx"].to_numpy(float), -1.0)
+
+
+class TeleportingMovement(StubMovement):
+    """A movement model whose draws are physically impossible, on demand.
+
+    The real failure is a tail: the decoder is Gaussian, so a small fraction of draws
+    land somewhere no player could reach in a flight. Reproducing that with a stub
+    means choosing when it happens rather than sampling until it does.
+    """
+
+    def __init__(self, priors, features=None, bad_draws=2, distance=400.0):
+        super().__init__(priors, features)
+        self.bad_draws, self.distance = bad_draws, distance
+        self.calls = 0
+
+    def sample_positions(self, x, release_xy, n=20, seed=None):
+        self.calls += 1
+        scenes = super().sample_positions(x, release_xy, n=n, seed=seed)
+        if self.calls == 1:
+            scenes[: self.bad_draws, ..., 0] += self.distance
+        return scenes
+
+
+def test_impossible_scenes_are_redrawn_rather_than_drawn(rows, priors):
+    """~1 scene in 100 from the real model needs a player to outrun the corpus."""
+    from rebounding.constants import MAX_SPEED_FPS
+    from rebounding.serve import animate
+
+    shot = next(iter(rows.groupby("ShotID", sort=False)))[1].sort_values("Slot")
+    players = _players_from(shot)
+    movement = TeleportingMovement(priors, bad_draws=2)
+
+    result = animate(movement, players, n=6, seed=1)
+
+    flight = float(result.features["flight_hat"].iloc[0])
+    release = np.array([[p.x, p.y] for p in players])
+    speed = np.linalg.norm(result.scenes - release, axis=-1) / flight
+    assert speed.max() <= MAX_SPEED_FPS
+    assert result.redrawn == 2
+    assert result.clamped == 0
+    assert movement.calls > 1
+
+
+def test_a_scene_that_is_already_possible_is_left_alone(rows, priors):
+    """The filter must not quietly reshape the 99% of draws that are fine."""
+    from rebounding.serve import animate
+
+    shot = next(iter(rows.groupby("ShotID", sort=False)))[1].sort_values("Slot")
+    players = _players_from(shot)
+
+    plain = animate(StubMovement(priors), players, n=5, seed=1)
+    assert plain.redrawn == 0 and plain.clamped == 0
+    np.testing.assert_allclose(
+        plain.scenes, animate(StubMovement(priors), players, n=5, seed=1).scenes
+    )
+
+
+def test_a_scene_that_stays_impossible_is_clamped_not_looped(priors):
+    """Rejection cannot be unbounded, so the last resort is to cut the distance."""
+    from rebounding.constants import MAX_SPEED_FPS
+    from rebounding.serve import _reject_impossible
+
+    release = np.tile(np.array([20.0, 25.0]), (10, 1))
+    scenes = np.tile(release, (4, 1, 1))
+    scenes[..., 0] += 500.0  # every player, every scene, hopelessly far
+
+    filtered, redrawn, clamped = _reject_impossible(
+        lambda count: scenes[:count].copy(), scenes.copy(), release, flight=1.9
+    )
+
+    speed = np.linalg.norm(filtered - release, axis=-1) / 1.9
+    assert speed.max() == pytest.approx(MAX_SPEED_FPS)
+    assert clamped == 40 and redrawn == 12
+    # The clamp keeps each player's heading and only takes back the distance.
+    direction = (filtered - release) / np.linalg.norm(filtered - release, axis=-1)[..., None]
+    assert direction[..., 0] == pytest.approx(1.0)
