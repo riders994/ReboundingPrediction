@@ -301,7 +301,9 @@ def load(path: str | Path = DEFAULT_OUTPUT) -> ModelArtifact:
         raise ModuleNotFoundError(
             f"{path} references {exc.name!r}, which is not importable here. The bundle "
             "stores the model and priors by class, so the serving host needs the "
-            "`rebounding` package installed (and lightgbm alongside it)."
+            "`rebounding` package and its serving extra: "
+            "pip install 'rebounding[serve]' "
+            "--extra-index-url https://download.pytorch.org/whl/cpu"
         ) from exc
 
     if not isinstance(artifact, (ModelArtifact, MovementArtifact)):

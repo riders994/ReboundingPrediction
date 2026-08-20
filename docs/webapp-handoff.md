@@ -578,6 +578,26 @@ now refuses this regime outright rather than fitting it off the frame.
 
 ## 6. Deployment
 
+### Installing on the app host
+
+```bash
+pip install 'rebounding[serve]' --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+The `serve` extra is exactly what `predict` and `animate` need. Two things about that
+line are load-bearing:
+
+- **The CPU index is not optional.** Without it pip resolves torch's default Linux
+  wheel, which carries a bundled CUDA runtime — roughly 2.5 GB onto a host that will
+  never see a GPU. The movement model is 802k parameters over ten tokens and one
+  request is a single forward pass; the CPU wheel is not a compromise here.
+- **scikit-learn is a serving dependency, not a training one.** It looks like it should
+  be droppable, and it is not: `BoostedSoftmax` fits a `lightgbm.LGBMRegressor`, so
+  `FinalModel.pkl` unpickles an sklearn estimator and `load` fails without it. The only
+  thing `serve` drops relative to `models` is xgboost.
+
+### Serving
+
 - `app.run(host='0.0.0.0', port=80)` is the Flask **development server**. The parent
   repo's last commit message ("Need to add GUnicorn capabilities to load balance")
   says this was already known. Use gunicorn behind a real proxy.

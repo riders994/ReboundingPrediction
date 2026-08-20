@@ -19,6 +19,31 @@ models = [
     "torch>=2.2",
     "lightgbm>=4.0",
 ]
+# What the web app host needs to run `serve.predict` and `serve.animate`, and
+# nothing else. It drops only `xgboost` from `models`, which is less than it looks
+# like it should: `BoostedSoftmax` fits a `lightgbm.LGBMRegressor`, so the shipped
+# bundle unpickles an sklearn estimator and **scikit-learn is a hard serving
+# dependency**, not a training one. Checked by making the omitted packages
+# unimportable and running both entry points against the real bundles.
+#
+# `joblib` is listed because `artifact.save`/`load` import it directly. It has always
+# arrived transitively with scikit-learn, which is why the omission never bit; naming
+# it means a future install that loses that transitive edge fails at resolve time
+# rather than on the first `load`.
+#
+# **Install torch from the CPU index**, or pip resolves the default Linux wheel and
+# pulls ~2.5 GB of CUDA onto a host that will never have a GPU:
+#
+#     pip install '.[serve]' --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# A dependency cannot name its own index -- PEP 508 has no syntax for it -- so this
+# is an install-line convention rather than something the metadata can enforce.
+serve = [
+    "joblib>=1.3",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.0",
+    "torch>=2.2",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
