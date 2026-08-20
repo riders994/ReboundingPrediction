@@ -139,6 +139,53 @@ def boxgen(xy: np.ndarray) -> np.ndarray:
     return np.concatenate([first_counts, second_counts]).astype(np.float32)
 
 
+def rim_features(
+    pre_xy: np.ndarray, pos_xy: np.ndarray, is_shooter: np.ndarray
+) -> dict[str, np.ndarray]:
+    """The rim-time half of :data:`RIM_FEATURES`, from two sets of positions.
+
+    Batched over shots: every argument carries a leading shot axis, ``pre_xy`` and
+    ``pos_xy`` are ``(n_shots, 10, 2)`` in the folded frame and ``is_shooter`` is
+    ``(n_shots, 10)``.
+
+    Split out of :func:`shot_features` so that the **movement model's predictions go
+    through the identical arithmetic as the tracking data**. The rim-time features are
+    the movement model's whole reason for existing, and computing them one way when
+    training on real positions and another way when serving predicted ones is the same
+    class of mistake as passing zeros for a velocity. There is now one implementation
+    and both callers use it.
+
+    ``pos_box`` assumes the canonical slot order -- first five rows one team, last five
+    the other -- which :func:`shot_features` establishes and the movement model
+    preserves, since it predicts a displacement per slot.
+    """
+    pre_xy, pos_xy = np.asarray(pre_xy, float), np.asarray(pos_xy, float)
+    if pre_xy.shape != pos_xy.shape or pre_xy.shape[-2:] != (N_PLAYERS, 2):
+        raise ValueError(
+            f"expected matching (n_shots, {N_PLAYERS}, 2), got {pre_xy.shape} and {pos_xy.shape}"
+        )
+
+    pre_dist, pos_dist = rim_distance(pre_xy), rim_distance(pos_xy)
+    pos_angle = rim_angle(pos_xy)
+    shooter_angle = (pos_angle * is_shooter).sum(axis=-1, keepdims=True)
+    move = pos_xy - pre_xy
+
+    return {
+        "pos_x": pos_xy[..., 0],
+        "pos_y": pos_xy[..., 1],
+        "pos_dist": pos_dist,
+        "pos_angle": pos_angle,
+        "pos_cos_shooter": np.cos(pos_angle - shooter_angle),
+        "pos_box": np.stack(
+            [boxgen(scene) for scene in pos_xy.reshape(-1, N_PLAYERS, 2)]
+        ).reshape(pos_dist.shape),
+        "move_dx": move[..., 0],
+        "move_dy": move[..., 1],
+        "move_dist": np.hypot(move[..., 0], move[..., 1]),
+        "closed_on_rim": np.where(pos_dist < pre_dist, 1.0, -1.0),
+    }
+
+
 def _velocity(tracking: GameTracking, index: int, quarter: int) -> np.ndarray:
     """Per-player ``(10, 2)`` velocity in ft/s, by backward difference."""
     moments = tracking.moments
@@ -197,25 +244,29 @@ def shot_features(tracking: GameTracking, shot: pd.Series) -> pd.DataFrame | Non
     if is_shooter.sum() != 1:
         return None
 
-    pre_dist, pos_dist = rim_distance(pre_xy), rim_distance(pos_xy)
-    pre_angle, pos_angle = rim_angle(pre_xy), rim_angle(pos_xy)
-    shooter_slot = int(np.argmax(is_shooter))
+    # Canonical slots: offence first, then defence, each nearest-to-rim first at
+    # release. Deterministic and reproducible from release-time data alone. The sort
+    # is applied to the arrays rather than to the assembled frame so that the rim-time
+    # columns can come from :func:`rim_features`, which needs the team blocks already
+    # in place -- and which is the same code the movement model's predictions go
+    # through at serving time.
+    order = np.lexsort((rim_distance(pre_xy), -is_offense))
+    pre_xy, pos_xy, velocity = pre_xy[order], pos_xy[order], velocity[order]
+    player_ids, team_ids = player_ids[order], team_ids[order]
+    is_offense, is_shooter = is_offense[order], is_shooter[order]
 
-    move = pos_xy - pre_xy
+    pre_dist, pre_angle = rim_distance(pre_xy), rim_angle(pre_xy)
+    shooter_slot = int(np.argmax(is_shooter))
+    rim_columns = rim_features(pre_xy[None], pos_xy[None], is_shooter[None])
+
     frame = pd.DataFrame(
         {
             "pre_x": pre_xy[:, 0], "pre_y": pre_xy[:, 1],
             "pre_dist": pre_dist, "pre_angle": pre_angle,
             "pre_vx": velocity[:, 0], "pre_vy": velocity[:, 1],
             "pre_speed": np.hypot(velocity[:, 0], velocity[:, 1]),
-            "pos_x": pos_xy[:, 0], "pos_y": pos_xy[:, 1],
-            "pos_dist": pos_dist, "pos_angle": pos_angle,
-            "move_dx": move[:, 0], "move_dy": move[:, 1],
-            "move_dist": np.linalg.norm(move, axis=1),
-            # Signed: positive when the player ended up closer to the rim.
-            "closed_on_rim": np.where(pos_dist < pre_dist, 1.0, -1.0),
+            **{name: values[0] for name, values in rim_columns.items()},
             "pre_cos_shooter": np.cos(pre_angle - pre_angle[shooter_slot]),
-            "pos_cos_shooter": np.cos(pos_angle - pos_angle[shooter_slot]),
             "is_offense": is_offense,
             "is_shooter": is_shooter,
             "role": [tracking.roles.get(str(int(pid)), 3.0) for pid in player_ids],
@@ -223,15 +274,7 @@ def shot_features(tracking: GameTracking, shot: pd.Series) -> pd.DataFrame | Non
             "TeamID": team_ids,
         }
     )
-
-    # Canonical slots: offence first, then defence, each nearest-to-rim first at
-    # release. Deterministic and reproducible from release-time data alone.
-    frame = frame.sort_values(
-        ["is_offense", "pre_dist"], ascending=[False, True], kind="stable"
-    ).reset_index(drop=True)
-
-    frame["pre_box"] = boxgen(frame[["pre_x", "pre_y"]].to_numpy())
-    frame["pos_box"] = boxgen(frame[["pos_x", "pos_y"]].to_numpy())
+    frame["pre_box"] = boxgen(pre_xy)
 
     frame["Slot"] = np.arange(N_PLAYERS)
     frame["ShotID"] = shot["ShotID"]
