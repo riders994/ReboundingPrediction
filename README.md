@@ -391,6 +391,13 @@ basketball has contact. `cov50`/`cov90` should read 50% and 90% for a calibrated
 The damped-velocity row is a reference and not a candidate: it needs a release velocity
 the web app has no way to collect.
 
+Every column but `error` is a Monte-Carlo estimate over 20 draws, so read the last digit
+as noise. Re-scoring the shipped bundle at five seeds moves `minADE` by 0.01 ft, `cov50`
+and `cov90` by 0.3 points, and `contacts` by 0.007 — small enough not to change any
+reading above, and large enough that two of the figures quoted here (`cov90` 83.1%,
+`contacts` 0.56) sit at the flattering edge of that range rather than in its middle.
+`error` involves no sampling and is exact at 4.938 ft.
+
 Four readings.
 
 **The architecture pays for itself before any head does.** `point` is the 2017 shape and
