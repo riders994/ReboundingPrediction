@@ -530,6 +530,12 @@ python -m rebounding.cli train-movement --out MovementModel.pkl   # in this repo
 scp MovementModel.pkl <host>:<app dir>/                           # alongside FinalModel.pkl
 ```
 
+That build is deterministic: seeded at 0 and rebuilt from a clean tree, it reproduces
+the shipped weights **bitwise**, all 801,946 of them. So `cli describe --model
+MovementModel.pkl` is checkable rather than merely informative — if the commit it
+names is not the one you expect, rebuild at that commit and compare, and the answer
+is exact rather than approximate.
+
 ```python
 from rebounding.models.artifact import load_movement
 from rebounding.serve import animate
