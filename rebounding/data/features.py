@@ -89,6 +89,13 @@ _VELOCITY_COLUMNS = ("pre_vx", "pre_vy", "pre_speed")
 # they actually replace rather than against one that uses a velocity.
 STATIC_FEATURES = [f for f in RELEASE_FEATURES if f not in _VELOCITY_COLUMNS]
 
+# Note what is *not* here: anything about who the players are. The project predicts
+# rebounds from location data alone, so per-player history is out of scope even though
+# it works -- a smoothed historical rebound rate is worth +1.2 points of top-1, and it
+# is excluded on grounds of the question being asked rather than of performance. See the
+# README, "Out of scope on purpose". `role` is the one exception, kept for continuity
+# with the 2017 model concept; if it ever goes, retrain without it rather than serving a
+# default, which is strictly worse than not having the feature.
 SERVED_FEATURES = [*STATIC_FEATURES, *CONTEST_DERIVED, *SHOT_DERIVED]
 
 # Release plus everything derivable from it. Needs the frame to have been through

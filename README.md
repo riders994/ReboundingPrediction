@@ -343,6 +343,32 @@ player does next is dominated by an intention his current heading does not revea
 That is the strongest argument in this repo for a generative scene model over a
 kinematic one, and equally the reason no cheap version of one will do.
 
+### Out of scope on purpose: who the players are
+
+The premise is predicting a rebound **from location data alone**, so per-player history
+is excluded by design rather than by oversight. This is worth stating because it is not
+a null result — it works.
+
+A smoothed per-player historical rebound rate, fitted on the training games and applied
+to the later ones, is worth **+1.2 points** of top-1 (29.7% → 30.9%). Only about 0.3 of
+that is the position effect the model already has through `role`; the remaining ~0.9 is
+individual, separating players who share a listed position. It is measuring real
+rebounding — the highest fitted rates are Drummond (.338), Whiteside (.320) and DeAndre
+Jordan (.308), the lowest Isaiah Thomas (.076), Redick (.072) and Wiggins (.072). It
+also would not tie the app to this corpus, since any published rebound rate could be
+fed at serving time.
+
+It is still out, because "which of these ten players gets the board, knowing only where
+they stand" is the question the project exists to answer. Adding a scouting prior
+answers a different and easier one.
+
+`role` — the listed-position ordinal — is the deliberate exception. It is an attribute
+of the player rather than a location, and it is worth 2.1 points (3rd of 27 by gain),
+but it was part of the original 2017 model concept and is kept for continuity with it.
+If it is ever dropped it must be **removed and retrained**, never defaulted: serving a
+placeholder 3.0 to a model trained on real positions scores 26.9%, worse than the 27.6%
+of an honest model that never had the feature.
+
 ### What was tried and did not work
 
 Recorded because the next person will otherwise try them again.
