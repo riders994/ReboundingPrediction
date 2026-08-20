@@ -102,11 +102,24 @@ SERVED_FEATURES = [*STATIC_FEATURES, *CONTEST_DERIVED, *SHOT_DERIVED]
 # :meth:`rebounding.data.derived.ShotPriors.transform` first.
 RELEASE_DERIVED_FEATURES = [*RELEASE_FEATURES, *DERIVED_FEATURES]
 
+# The rim-time columns a movement model can supply that the served set does not
+# already have. `is_offense`, `is_shooter` and `role` appear in RIM_FEATURES too, but
+# they are true at both moments and are already served, so nothing has to predict them.
+MOVEMENT_SUPPLIED = [f for f in RIM_FEATURES if f not in SERVED_FEATURES]
+
+# The web app model as it is meant to end up: everything a user can place, plus
+# everything the movement model can forecast from it. Fitting this regime requires
+# *predicted* positions on the training rows as well as the served ones -- training it
+# on rim-time truth and serving it predictions is the train/serve skew that the 2017
+# model's 86% top-1 was made of.
+SERVED_PLUS_MOVEMENT = [*SERVED_FEATURES, *MOVEMENT_SUPPLIED]
+
 FEATURE_REGIMES = {
     "release": RELEASE_FEATURES,
     "release+derived": RELEASE_DERIVED_FEATURES,
     "static": STATIC_FEATURES,
     "served": SERVED_FEATURES,
+    "served+movement": SERVED_PLUS_MOVEMENT,
     "rim": RIM_FEATURES,
     "all": [*PLAYER_FEATURES, *DERIVED_FEATURES],
 }

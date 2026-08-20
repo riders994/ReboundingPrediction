@@ -1,9 +1,10 @@
 """Command line entry points.
 
-    python -m rebounding.cli build   --games data/7zips --out data/frame.parquet
-    python -m rebounding.cli train   --out FinalModel.pkl
-    python -m rebounding.cli predict --players players.json
-    python -m rebounding.cli inspect --game data/7zips/01.01.2016.CHA.at.TOR.7z
+    python -m rebounding.cli build          --games data/7zips --out data/frame.parquet
+    python -m rebounding.cli train          --out FinalModel.pkl
+    python -m rebounding.cli train-movement --out MovementModel.pkl
+    python -m rebounding.cli predict        --players players.json
+    python -m rebounding.cli inspect        --game data/7zips/01.01.2016.CHA.at.TOR.7z
 
 ``build`` needs play-by-play. ``stats.nba.com`` no longer serves it, so it comes
 from Basketball-Reference (see :mod:`rebounding.data.bref`) unless a cached NBA
@@ -70,7 +71,19 @@ def _train(args: argparse.Namespace) -> int:
         print(f"no frame at {args.frame}; run `build --out {args.frame}` first", file=sys.stderr)
         return 1
 
-    built = artifact.build(args.frame, fit_on=args.fit_on, regime=args.regime)
+    movement = None
+    if args.regime == "served+movement":
+        if not Path(args.movement).exists():
+            print(
+                f"no movement model at {args.movement}; run `train-movement` first",
+                file=sys.stderr,
+            )
+            return 1
+        movement = artifact.load_movement(args.movement)
+
+    built = artifact.build(
+        args.frame, fit_on=args.fit_on, regime=args.regime, movement=movement
+    )
     out = args.out or (
         artifact.DEFAULT_OUTPUT if args.regime == "served" else Path(f"{args.regime}-model.pkl")
     )
@@ -84,6 +97,27 @@ def _train(args: argparse.Namespace) -> int:
         print(f"scp it to the web app host; `describe --model {path}` prints this block again")
     else:
         print(f"reference model, not servable; `describe --model {path}` prints this block again")
+    return 0
+
+
+def _train_movement(args: argparse.Namespace) -> int:
+    """Fit the movement model -- the one the app animates, and the rebounder's feeder."""
+    from rebounding.models.movement import MovementConfig
+
+    if not Path(args.frame).exists():
+        print(f"no frame at {args.frame}; run `build --out {args.frame}` first", file=sys.stderr)
+        return 1
+
+    config = MovementConfig(head=args.head, epochs=args.epochs, seed=args.seed)
+    built = artifact.build_movement(args.frame, fit_on=args.fit_on, config=config)
+    path = artifact.save(built, args.out or artifact.DEFAULT_MOVEMENT_OUTPUT)
+    print(built.describe())
+    print()
+    print(f"wrote {path} ({path.stat().st_size / 1e6:.2f} MB)")
+    print(
+        "scp it alongside FinalModel.pkl. To fold it into the rebounder as well, "
+        f"`train --regime served+movement` reads it back from {path}."
+    )
     return 0
 
 
@@ -197,7 +231,37 @@ def main(argv: list[str] | None = None) -> int:
             "cannot be served"
         ),
     )
+    train_cmd.add_argument(
+        "--movement",
+        default=str(artifact.DEFAULT_MOVEMENT_OUTPUT),
+        help="movement bundle to generate the extra columns of the served+movement regime",
+    )
     train_cmd.set_defaults(func=_train)
+
+    movement_cmd = sub.add_parser(
+        "train-movement", help="fit the movement model and write MovementModel.pkl"
+    )
+    movement_cmd.add_argument("--frame", default="data/frame.parquet", help="parquet from `build`")
+    movement_cmd.add_argument("--out", default=None, help=f"defaults to {artifact.DEFAULT_MOVEMENT_OUTPUT}")
+    movement_cmd.add_argument(
+        "--head",
+        default="cvae",
+        choices=("point", "mixture", "cvae"),
+        help=(
+            "cvae samples whole coherent scenes and is what the UI should draw; "
+            "mixture is multimodal but per player; point is the 2017 shape, kept to "
+            "measure what averaging a bimodal target costs"
+        ),
+    )
+    movement_cmd.add_argument("--epochs", type=int, default=120)
+    movement_cmd.add_argument("--seed", type=int, default=0)
+    movement_cmd.add_argument(
+        "--fit-on",
+        default="train",
+        choices=list(artifact.FIT_CHOICES),
+        help="train keeps the validation games to stop on; train+val carves a stopping slice instead",
+    )
+    movement_cmd.set_defaults(func=_train_movement)
 
     describe_cmd = sub.add_parser("describe", help="print a built artifact's provenance and scores")
     describe_cmd.add_argument("--model", default=str(artifact.DEFAULT_OUTPUT))

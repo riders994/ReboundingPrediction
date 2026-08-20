@@ -230,7 +230,9 @@ def test_load_rejects_a_foreign_pickle(tmp_path):
 
     path = tmp_path / "not-a-bundle.pkl"
     joblib.dump({"model": "surprise"}, path)
-    with pytest.raises(TypeError, match="not a ModelArtifact"):
+    # `load` now accepts either bundle -- the rebounder's or the movement model's --
+    # so it names the family rather than one class.
+    with pytest.raises(TypeError, match="not an artifact"):
         load(path)
 
 
@@ -262,3 +264,107 @@ def test_load_warns_when_the_package_has_drifted(built, tmp_path, caplog):
         load(path)
     assert "artifact.features" in caplog.text
     assert "served" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# The movement bundle, and the regime that depends on it
+# --------------------------------------------------------------------------- #
+
+torch = pytest.importorskip("torch", reason="the movement artifact needs torch")
+
+
+@pytest.fixture(scope="module")
+def movement_built(frame_path):
+    from rebounding.models.artifact import build_movement
+    from rebounding.models.movement import MovementConfig
+
+    return build_movement(
+        frame_path,
+        config=MovementConfig(
+            head="cvae", d_model=16, n_layers=1, n_heads=2, d_ff=32, d_latent=4,
+            epochs=2, batch_size=64, patience=99,
+        ),
+    )
+
+
+def test_the_movement_bundle_carries_weights_not_a_network(movement_built):
+    """The modules live inside a closure and cannot be pickled; the weights can.
+
+    This is also what pytorch recommends, so the constraint and the good practice
+    happen to agree -- but the bundle would be silently unloadable if it drifted back
+    to storing the object.
+    """
+    assert set(movement_built.state) == {"config", "n_features", "weights"}
+    assert all(isinstance(w, np.ndarray) for w in movement_built.state["weights"].values())
+
+
+def test_the_movement_bundle_round_trips(movement_built, tmp_path):
+    from rebounding.models.artifact import load_movement
+
+    path = save(movement_built, tmp_path / "MovementModel.pkl")
+    reloaded = load_movement(path)
+
+    x = np.zeros((4, N_PLAYERS, len(movement_built.features)), dtype=np.float32)
+    release = np.tile(np.array([30.0, 25.0]), (4, N_PLAYERS, 1))
+    np.testing.assert_allclose(
+        reloaded.predict_positions(x, release), movement_built.predict_positions(x, release),
+        atol=1e-5,
+    )
+
+
+def test_the_movement_bundle_consumes_the_served_features(movement_built):
+    """It has to run where rim-time positions do not exist, so it eats what the app has."""
+    assert movement_built.features == SERVED_FEATURES
+
+
+def test_the_movement_bundle_refuses_the_wrong_width(movement_built):
+    with pytest.raises(ValueError, match="27 served features"):
+        movement_built.predict_positions(
+            np.zeros((2, N_PLAYERS, 5), dtype=np.float32), np.zeros((2, N_PLAYERS, 2))
+        )
+
+
+def test_load_movement_refuses_a_rebounder_bundle(built, tmp_path):
+    from rebounding.models.artifact import load_movement
+
+    path = save(built, tmp_path / "FinalModel.pkl")
+    with pytest.raises(TypeError, match="not a MovementArtifact"):
+        load_movement(path)
+
+
+def test_the_movement_regime_needs_a_movement_model(frame_path):
+    with pytest.raises(ValueError, match="needs a movement artifact"):
+        build(frame_path, regime="served+movement")
+
+
+def test_the_movement_regime_trains_on_predictions_not_on_truth(frame_path, movement_built):
+    """The rim-time columns must come from the model, never off the frame.
+
+    Training on the corpus's real ``pos_*`` and serving forecasts is the skew that
+    produced 2017's 86% top-1, so this asserts the arithmetic rather than trusting the
+    comment above it: the fitted block has to match what the movement model predicts
+    and *not* match the truth sitting in the same frame.
+    """
+    from rebounding.data.features import MOVEMENT_SUPPLIED, to_tensor
+    from rebounding.eval.split import split_by_game
+
+    artifact_out = build(
+        frame_path, regime="served+movement", movement=movement_built,
+        model=BoostedSoftmax(n_estimators=10, learning_rate=0.2),
+    )
+    assert artifact_out.features == [*SERVED_FEATURES, *MOVEMENT_SUPPLIED]
+    assert artifact_out.metadata["movement"]["head"] == "cvae"
+
+    rows = split_by_game(pd.read_parquet(frame_path)).test
+    transformed = artifact_out.priors.transform(rows)
+    served, _, _ = to_tensor(transformed, SERVED_FEATURES)
+    release, _, _ = to_tensor(transformed, ["pre_x", "pre_y"])
+    shooter, _, _ = to_tensor(transformed, ["is_shooter"])
+    truth, _, _ = to_tensor(transformed, ["pos_x", "pos_y"])
+
+    block = movement_built.rim_block(served, release, shooter[..., 0])
+    predicted_positions = movement_built.predict_positions(served, release)
+    np.testing.assert_allclose(block[..., :2], predicted_positions, rtol=1e-5)
+    # The fixture's rim positions are random, so a model that had copied them would
+    # have to be within tracking noise of them. It is nowhere near.
+    assert np.abs(block[..., :2] - truth).mean() > 1.0

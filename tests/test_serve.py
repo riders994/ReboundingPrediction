@@ -328,3 +328,88 @@ def test_player_id_is_carried_through():
     ]
     frame = feature_frame(payload)
     assert set(frame["PlayerID"]) == {f"p{i}" for i in range(N_PLAYERS)}
+
+
+# --------------------------------------------------------------------------- #
+# The movement model's two roles: the animation, and the extra ten columns
+# --------------------------------------------------------------------------- #
+
+
+class StubMovement:
+    """A movement model that walks everyone one foot toward half court.
+
+    Deterministic on purpose, and with a spread that comes from the sample index
+    rather than from a random draw, so both the ordering and the sampling can be
+    asserted without a trained network in the test.
+    """
+
+    def __init__(self, priors, features=None):
+        self.priors = priors
+        self.features = list(features or SERVED_FEATURES)
+
+    def predict_positions(self, x, release_xy):
+        step = np.zeros_like(release_xy)
+        step[..., 0] = -1.0
+        return release_xy + step
+
+    def sample_positions(self, x, release_xy, n=20, seed=None):
+        offsets = np.arange(n, dtype=float).reshape(n, 1, 1, 1)
+        return self.predict_positions(x, release_xy)[None] + offsets
+
+    def rim_block(self, x, release_xy, is_shooter, positions=None):
+        from rebounding.data.features import MOVEMENT_SUPPLIED, rim_features
+
+        if positions is None:
+            positions = self.predict_positions(x, release_xy)
+        columns = rim_features(release_xy, positions, is_shooter)
+        return np.stack([columns[c] for c in MOVEMENT_SUPPLIED], axis=-1).astype(np.float32)
+
+
+def test_animate_returns_scenes_in_the_callers_order(rows, priors):
+    from rebounding.serve import animate
+
+    shot = next(iter(rows.groupby("ShotID", sort=False)))[1].sort_values("Slot")
+    players = _players_from(shot)
+    # Hand them over in an order the pipeline would never produce.
+    shuffled = [players[i] for i in (9, 4, 1, 7, 0, 3, 8, 2, 6, 5)]
+
+    result = animate(StubMovement(priors), shuffled, n=4)
+    assert result.scenes.shape == (4, 10, 2)
+    for index, player in enumerate(shuffled):
+        assert result.mean[index, 0] == pytest.approx(player.x - 1.0)
+        assert result.mean[index, 1] == pytest.approx(player.y)
+
+
+def test_animate_samples_differ_from_each_other(rows, priors):
+    from rebounding.serve import animate
+
+    shot = next(iter(rows.groupby("ShotID", sort=False)))[1].sort_values("Slot")
+    result = animate(StubMovement(priors), _players_from(shot), n=3)
+    assert not np.allclose(result.scene(0), result.scene(1))
+
+
+def test_a_movement_hungry_artifact_is_refused_without_one(rows, priors):
+    """Rim-time columns cannot be read off a shot that has not landed."""
+    from rebounding.data.features import SERVED_PLUS_MOVEMENT
+
+    shot = next(iter(rows.groupby("ShotID", sort=False)))[1].sort_values("Slot")
+    artifact = StubArtifact(priors, features=SERVED_PLUS_MOVEMENT)
+    with pytest.raises(PlacementError, match="rim-time positions"):
+        predict(artifact, _players_from(shot))
+
+
+def test_the_movement_columns_reach_the_rebounder(rows, priors):
+    from rebounding.data.features import SERVED_PLUS_MOVEMENT
+
+    shot = next(iter(rows.groupby("ShotID", sort=False)))[1].sort_values("Slot")
+    artifact = StubArtifact(priors, features=SERVED_PLUS_MOVEMENT)
+    prediction = predict(artifact, _players_from(shot), movement=StubMovement(priors))
+
+    assert prediction.probabilities.shape == (10,)
+    # The stub walks every player a foot toward half court, so `pos_x` has to be
+    # `pre_x - 1` in the frame the trees were handed -- not the corpus's real value.
+    np.testing.assert_allclose(
+        prediction.features["pos_x"].to_numpy(float),
+        prediction.features["pre_x"].to_numpy(float) - 1.0,
+    )
+    np.testing.assert_allclose(prediction.features["move_dx"].to_numpy(float), -1.0)

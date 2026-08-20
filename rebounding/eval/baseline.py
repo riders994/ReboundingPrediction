@@ -29,6 +29,20 @@ from rebounding.models.baselines import NearestPlayer, SlotPrior
 from rebounding.models.boosted import BoostedSoftmax
 from rebounding.models.conditional_logit import ConditionalLogit
 
+# Regimes this module cannot fit, and why. `served+movement` is fittable only with a
+# trained movement model in hand: its rim-time columns have to come from that model's
+# *predictions*, and the frame's own `pos_*` are the truth. Reading them off the frame
+# would produce a number that looks like the app's and is not -- the ladder would quote
+# a servable regime scoring like the rim-time ceiling. Build it with
+# `cli train --regime served+movement --movement MovementModel.pkl` instead.
+UNFITTABLE_REGIMES = {
+    "served+movement": (
+        "needs a MovementArtifact to generate its rim-time columns; reading them off "
+        "the frame would train on truth and report it as a servable score. Use "
+        "`python -m rebounding.cli train --regime served+movement` instead"
+    )
+}
+
 
 def _distance_feature(names: list[str]) -> str:
     """The rim-distance column available in a regime, for the nearest-player rule."""
@@ -59,7 +73,9 @@ def run(
     split = prepare(frame_path)
 
     records = []
-    for regime in regimes or list(FEATURE_REGIMES):
+    for regime in regimes or [r for r in FEATURE_REGIMES if r not in UNFITTABLE_REGIMES]:
+        if regime in UNFITTABLE_REGIMES:
+            raise ValueError(f"regime {regime!r} {UNFITTABLE_REGIMES[regime]}")
         names = FEATURE_REGIMES[regime]
         x_train, y_train, _ = to_tensor(split.train, names)
         x_eval, y_eval, _ = to_tensor(getattr(split, on), names)

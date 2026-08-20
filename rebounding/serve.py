@@ -48,7 +48,7 @@ import pandas as pd
 from rebounding.constants import COURT_WIDTH, DEFAULT_POSITION, HALF_COURT_X, POSITION_MAP
 from rebounding.data.court import fold, rim_angle, rim_distance
 from rebounding.data.derived import VELOCITY_DERIVED
-from rebounding.data.features import N_PLAYERS, TEAM_SIZE, boxgen
+from rebounding.data.features import MOVEMENT_SUPPLIED, N_PLAYERS, TEAM_SIZE, boxgen
 
 # Raw velocity columns plus everything derived from one. None of these can be built
 # from static dots, so a model that wants any of them cannot be served here.
@@ -244,16 +244,85 @@ def feature_frame(
     return frame
 
 
+@dataclass(frozen=True)
+class MovementPrediction:
+    """Where the ten players go while the ball is in the air, **in caller order**.
+
+    ``scenes`` is ``(n, 10, 2)`` of sampled futures and is what the app should draw --
+    one per animation, or several at once as ghosts to show the spread. ``mean`` is
+    the conditional-mean scene, kept for the rebounder and for tests; drawing it is
+    the 2017 mistake, because the average of crashing the glass and leaking out is a
+    player standing in neither place.
+    """
+
+    scenes: np.ndarray
+    mean: np.ndarray
+    slots: np.ndarray
+    features: pd.DataFrame
+
+    def scene(self, index: int = 0) -> np.ndarray:
+        """One sampled future, ``(10, 2)``, indexed as the caller's list was."""
+        return self.scenes[index]
+
+
+def _served_tensor(artifact, frame: pd.DataFrame, wanted: Sequence[str]) -> np.ndarray:
+    missing = [name for name in wanted if name not in frame.columns]
+    if missing:
+        raise PlacementError(f"could not build {missing} for this artifact")
+    return frame[list(wanted)].to_numpy(dtype=np.float32).reshape(1, N_PLAYERS, len(wanted))
+
+
+def animate(
+    movement,
+    players: Iterable[Player | Mapping[str, Any]],
+    basket: str | None = None,
+    n: int = 20,
+    seed: int | None = None,
+) -> MovementPrediction:
+    """Run the movement model on ten placed players.
+
+    ``movement`` is a :class:`~rebounding.models.artifact.MovementArtifact`. This is
+    the app's other entry point beside :func:`predict`, and it replaces ``posnn.h5``
+    and the eight hand-built columns the 2017 ``features()`` fed it.
+
+    Sampling ``n`` scenes and drawing them is the intended use. A generative model
+    that gets averaged back down to one dot before it reaches the screen has had its
+    only advantage discarded on the last step.
+    """
+    frame = feature_frame(players, basket=basket)
+    enriched = movement.priors.transform(frame)
+    x = _served_tensor(movement, enriched, movement.features)
+    release = enriched[["pre_x", "pre_y"]].to_numpy(dtype=float).reshape(1, N_PLAYERS, 2)
+
+    by_slot_scenes = movement.sample_positions(x, release, n=n, seed=seed)[:, 0]
+    by_slot_mean = movement.predict_positions(x, release)[0]
+
+    input_index = enriched["InputIndex"].to_numpy(dtype=int)
+    scenes = np.empty_like(by_slot_scenes)
+    scenes[:, input_index] = by_slot_scenes
+    mean = np.empty_like(by_slot_mean)
+    mean[input_index] = by_slot_mean
+
+    slots = np.empty(len(input_index), dtype=int)
+    slots[input_index] = enriched["Slot"].to_numpy(dtype=int)
+    return MovementPrediction(scenes=scenes, mean=mean, slots=slots, features=enriched)
+
+
 def predict(
     artifact,
     players: Iterable[Player | Mapping[str, Any]],
     basket: str | None = None,
+    movement=None,
 ) -> ShotPrediction:
     """Score one placed shot with a loaded artifact.
 
     ``artifact`` is a :class:`~rebounding.models.artifact.ModelArtifact`. Its own
     ``features`` list drives the column order, not the imported ``SERVED_FEATURES`` --
     the artifact is the record of what the trees were actually fitted on.
+
+    An artifact fitted on the ``served+movement`` regime needs ``movement``: its last
+    ten columns are rim-time positions that only the movement model can supply. It is
+    refused rather than defaulted, for the same reason a velocity-hungry artifact is.
     """
     wanted = list(artifact.features)
     unservable = [name for name in wanted if name in UNSERVABLE_FEATURES]
@@ -266,16 +335,28 @@ def predict(
             "zero velocities."
         )
 
+    needs_movement = [name for name in wanted if name in MOVEMENT_SUPPLIED]
+    if needs_movement and movement is None:
+        raise PlacementError(
+            f"this artifact needs {needs_movement}, which are rim-time positions. Pass "
+            "a MovementArtifact as `movement=` -- these cannot be read off a placed "
+            "shot, because the shot has not landed yet."
+        )
+
     frame = feature_frame(players, basket=basket)
     enriched = artifact.priors.transform(frame)
 
-    missing = [name for name in wanted if name not in enriched.columns]
-    if missing:
-        raise PlacementError(f"could not build {missing} for this artifact")
-
     # to_tensor is not usable here: it reads a `Rebounder` label column, which does
     # not exist for a shot that has not happened.
-    x = enriched[wanted].to_numpy(dtype=np.float32).reshape(1, N_PLAYERS, len(wanted))
+    if needs_movement:
+        served = _served_tensor(movement, enriched, movement.features)
+        release = enriched[["pre_x", "pre_y"]].to_numpy(dtype=float).reshape(1, N_PLAYERS, 2)
+        shooter = enriched["is_shooter"].to_numpy(dtype=float).reshape(1, N_PLAYERS)
+        block = movement.rim_block(served, release, shooter)
+        for position, name in enumerate(MOVEMENT_SUPPLIED):
+            enriched[name] = block[0, :, position]
+
+    x = _served_tensor(artifact, enriched, wanted)
     by_slot = artifact.predict_proba(x)[0]
 
     # Back into the caller's order. This is the line that keeps the returned
