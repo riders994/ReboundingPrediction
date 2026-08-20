@@ -231,10 +231,36 @@ class ShotPriors:
         return self
 
     def predicted_flight(self, shot_distance: np.ndarray) -> np.ndarray:
+        """Predicted release-to-rim time, held flat past the distance where it peaks.
+
+        Flight time **saturates**. Binned over the training games it climbs from 1.12 s
+        inside 5 ft to 2.33 s by 30 ft and then stops: 2.34 s over 30-35 ft, 2.24 s over
+        35-40 ft. Past about 28 ft the shot is taken on a flatter, harder trajectory and
+        gains no more hang time.
+
+        A quadratic cannot express a plateau -- it has to turn over -- so the raw fit
+        predicts a 48.7 ft shot (the furthest a user can place a shooter on the web app's
+        half-court canvas) hanging 1.46 s, less than a ten-footer, and goes negative past
+        92 ft. Holding the peak fixes that, and it is not a patch over a bad fit: on the
+        validation split the clamped form scores 0.4035 RMSE against the unclamped
+        0.4037, and its plateau of 2.28 s lands within 0.05 s of the measured one.
+
+        Raising the degree does not help, which is worth recording so nobody retries it.
+        Degrees 2, 3, 4 and 6 all sit between 0.4032 and 0.4037 validation RMSE -- a
+        difference of half a millisecond -- and every one of them is non-monotone. The
+        higher degrees are worse where it matters: at 62 ft the quartic predicts 5.17 s
+        and the sextic 9.46 s. Saturating forms (``a + b*log(1+d)``, ``a + b*sqrt(d)``,
+        ``a + b*(1 - exp(-d/k))``) are all monotone but fit no better, and the first two
+        keep climbing where the data flattens.
+        """
         if self.flight_coefficients_ is None:
             raise RuntimeError("priors are not fitted")
         a, b, c = self.flight_coefficients_
-        return a + b * shot_distance + c * shot_distance**2
+        distance = np.asarray(shot_distance, dtype=float)
+        if c < 0:
+            # Downward parabola: the vertex is the peak, so clamp the input to it.
+            distance = np.minimum(distance, -b / (2.0 * c))
+        return a + b * distance + c * distance**2
 
     def transform(self, rows: pd.DataFrame) -> pd.DataFrame:
         """Return ``rows`` in canonical order with every derived column appended."""

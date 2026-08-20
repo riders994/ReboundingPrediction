@@ -32,13 +32,13 @@ against 26.8% for the model family it replaces.
 **The rebounder is buildable in one command.** `python -m rebounding.cli train` fits
 it and writes `FinalModel.pkl` — the model, the fitted `ShotPriors`, the served
 feature list in fitted order, and the provenance to identify the file later. It takes
-about eighteen seconds. The shipping fit uses train+val and scores **29.9% top-1** on
+about eighteen seconds. The shipping fit uses train+val and scores **29.7% top-1** on
 the untouched test games; every ladder number below is the train-only fit, which is
 what keeps the regimes comparable.
 
 `--regime` picks which of the project's three models to build. `served` is the web
 app's, restricted to what the UI can supply; `all` is the feature-rich source of
-truth, which scores **37.9%** and which `rebounding.serve` refuses to serve because
+truth, which scores **37.8%** and which `rebounding.serve` refuses to serve because
 its features do not exist at prediction time. The movement model is the third and does
 not live here yet. The 8.0 points between those two is its budget.
 
@@ -194,6 +194,22 @@ substitution check. None were recovered — where the clock lies there is usuall
 valid alternative release, so the shot is dropped rather than repaired. Accuracy is
 unchanged within noise in every regime, which is the expected result for a fix that
 removes 1.4% of the data: it buys correctness, not points.
+
+**Flight time saturates, and no polynomial says so.** With those points gone,
+`flight_hat`'s quadratic no longer had anything dragging its tail up: it peaked at
+27.9 ft and fell away, predicting that a 48.7 ft shot — the furthest a user can place a
+shooter on the app's canvas — hangs 1.46 s, less than a ten-footer, and going negative
+past 92 ft. The measured curve climbs to 2.33 s by 30 ft and then flattens, because past
+that range the shot is taken on a flatter, harder trajectory.
+
+Raising the degree does not help, and is recorded here so nobody retries it: degrees 2,
+3, 4 and 6 all sit within half a millisecond of each other on validation RMSE, every one
+is non-monotone, and the higher ones are wilder in the tail — 5.17 s at 62 ft for the
+quartic, 9.46 s for the sextic. Saturating forms (`log(1+d)`, `sqrt(d)`, `1 - exp(-d/k)`)
+are monotone but fit no better and the first two keep climbing where the data flattens.
+`predicted_flight` holds the peak instead, which is monotone, scores marginally *better*
+on validation than the unclamped fit (0.4035 against 0.4037), and lands within 0.05 s of
+the measured plateau.
 
 **Other fixes.** 44% of shots lost their description, because only
 `HOMEDESCRIPTION` was kept. 11% of rebounds — the team rebounds — were silently
@@ -371,7 +387,7 @@ There is also a train/serve skew that no amount of movement-model quality fixes:
 rebounder was trained and evaluated on ground-truth rim-time positions but served
 predicted ones. That skew is now measured rather than argued about — 6.0 points of
 top-1 — and the honest headline number is accuracy **from what the app can supply**,
-29.8% for the train-only fit the ladder above compares and **29.9% for the weights
+29.8% for the train-only fit the ladder above compares and **29.7% for the weights
 that actually ship**, both on the same held-out test games.
 
 The rebounder half of the rebuild plan is done: the grouped softmax matches the

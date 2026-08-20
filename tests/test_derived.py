@@ -225,6 +225,46 @@ def test_transform_never_reads_the_measured_flight_time(frame):
     assert np.allclose(baseline["ext_x"], after["ext_x"])
 
 
+def test_predicted_flight_never_decreases_with_distance():
+    """Flight time saturates; a bare quadratic turns over and eventually goes negative.
+
+    The web app's canvas lets a user place a shooter 48.7 ft from the rim, so the
+    turn-over is reachable, not hypothetical.
+    """
+    priors = ShotPriors()
+    # A downward parabola peaking at 25 ft, like the one fitted on real shots.
+    priors.flight_coefficients_ = np.array([1.0, 0.08, -0.0016])
+
+    distances = np.linspace(0.0, 95.0, 400)
+    predicted = priors.predicted_flight(distances)
+    assert np.all(np.diff(predicted) >= -1e-12)
+    assert (predicted > 0).all()
+
+    peak = priors.predicted_flight(np.array([25.0]))[0]
+    assert priors.predicted_flight(np.array([48.7]))[0] == pytest.approx(peak)
+    assert priors.predicted_flight(np.array([94.0]))[0] == pytest.approx(peak)
+
+
+def test_predicted_flight_is_unchanged_below_the_peak():
+    """Clamping must not touch the range where almost every shot actually lives."""
+    priors = ShotPriors()
+    coefficients = np.array([1.0, 0.08, -0.0016])
+    priors.flight_coefficients_ = coefficients
+
+    a, b, c = coefficients
+    below = np.linspace(0.0, 24.0, 50)
+    assert np.allclose(priors.predicted_flight(below), a + b * below + c * below**2)
+
+
+def test_predicted_flight_leaves_an_upward_parabola_alone():
+    """The clamp targets a peak. An upward fit has a minimum, not a maximum."""
+    priors = ShotPriors()
+    priors.flight_coefficients_ = np.array([1.0, 0.05, 0.0004])
+    distances = np.array([10.0, 40.0, 80.0])
+    expected = 1.0 + 0.05 * distances + 0.0004 * distances**2
+    assert np.allclose(priors.predicted_flight(distances), expected)
+
+
 def test_priors_are_fitted_only_on_what_they_are_given(frame):
     """Two disjoint fits must differ, or the fit is not using its input."""
     first = ShotPriors().fit(frame[frame["GameID"].isin(["g0", "g1"])])
