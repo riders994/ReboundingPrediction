@@ -22,9 +22,12 @@ Notable changes:
   would not be reproducible when serving.
 * **Team rebounds are kept**, labelled via ``IsTeamRebound`` rather than dropped.
   The old ``features()`` returned ``[]`` whenever no individual rebounder matched.
-* **Velocity is included.** The old pipeline extracted two isolated frames and
-  never computed motion, which is the most likely single reason the movement model
-  underperformed.
+* **Velocity is included.** The old pipeline extracted two isolated frames and never
+  computed motion at all. It is worth 1.9 points of top-1 to the rebounder, which is
+  less than that omission was once assumed to cost -- see
+  :mod:`rebounding.data.derived` on how little of a player's next second his current
+  heading explains. The web app cannot supply one, so
+  :data:`SERVED_FEATURES` is the variant without it.
 * ``boxgen`` asserts its shape instead of silently producing wrong counts when a
   tracking glitch yields other than five players a side.
 """
@@ -36,6 +39,7 @@ import pandas as pd
 
 from rebounding.constants import HOOP
 from rebounding.data.court import fold, fold_vector, rim_angle, rim_distance
+from rebounding.data.derived import CONTEST_DERIVED, DERIVED_FEATURES, SHOT_DERIVED
 from rebounding.data.sportvu import GameTracking
 
 N_PLAYERS = 10
@@ -74,11 +78,54 @@ RIM_FEATURES = [
     "move_dx", "move_dy", "move_dist", "closed_on_rim", *_STATIC_FEATURES,
 ]
 
+# Release-time features that survive when nobody supplies a velocity. The web app
+# asks a user to place ten players and press go, and the handoff brief settled that
+# it will not also ask for ten direction vectors, so this is the set that can
+# actually be served. See :mod:`rebounding.data.derived`.
+_VELOCITY_COLUMNS = ("pre_vx", "pre_vy", "pre_speed")
+
+# What the app could serve before any of this: positions only, nothing derived.
+# Carried as its own regime so the derived features are measured against the set
+# they actually replace rather than against one that uses a velocity.
+STATIC_FEATURES = [f for f in RELEASE_FEATURES if f not in _VELOCITY_COLUMNS]
+
+# Note what is *not* here: anything about who the players are. The project predicts
+# rebounds from location data alone, so per-player history is out of scope even though
+# it works -- a smoothed historical rebound rate is worth +1.2 points of top-1, and it
+# is excluded on grounds of the question being asked rather than of performance. See the
+# README, "Out of scope on purpose". `role` is the one exception, kept for continuity
+# with the 2017 model concept; if it ever goes, retrain without it rather than serving a
+# default, which is strictly worse than not having the feature.
+SERVED_FEATURES = [*STATIC_FEATURES, *CONTEST_DERIVED, *SHOT_DERIVED]
+
+# Release plus everything derivable from it. Needs the frame to have been through
+# :meth:`rebounding.data.derived.ShotPriors.transform` first.
+RELEASE_DERIVED_FEATURES = [*RELEASE_FEATURES, *DERIVED_FEATURES]
+
+# The rim-time columns a movement model can supply that the served set does not
+# already have. `is_offense`, `is_shooter` and `role` appear in RIM_FEATURES too, but
+# they are true at both moments and are already served, so nothing has to predict them.
+MOVEMENT_SUPPLIED = [f for f in RIM_FEATURES if f not in SERVED_FEATURES]
+
+# The web app model as it is meant to end up: everything a user can place, plus
+# everything the movement model can forecast from it. Fitting this regime requires
+# *predicted* positions on the training rows as well as the served ones -- training it
+# on rim-time truth and serving it predictions is the train/serve skew that the 2017
+# model's 86% top-1 was made of.
+SERVED_PLUS_MOVEMENT = [*SERVED_FEATURES, *MOVEMENT_SUPPLIED]
+
 FEATURE_REGIMES = {
     "release": RELEASE_FEATURES,
+    "release+derived": RELEASE_DERIVED_FEATURES,
+    "static": STATIC_FEATURES,
+    "served": SERVED_FEATURES,
+    "served+movement": SERVED_PLUS_MOVEMENT,
     "rim": RIM_FEATURES,
-    "all": PLAYER_FEATURES,
+    "all": [*PLAYER_FEATURES, *DERIVED_FEATURES],
 }
+
+# The regimes whose features exist without running the derived transform.
+BASE_REGIMES = ("release", "rim")
 
 
 def boxgen(xy: np.ndarray) -> np.ndarray:
@@ -103,6 +150,53 @@ def boxgen(xy: np.ndarray) -> np.ndarray:
     first_counts = np.bincount(nearest_first, minlength=TEAM_SIZE)
     second_counts = np.bincount(nearest_second, minlength=TEAM_SIZE)
     return np.concatenate([first_counts, second_counts]).astype(np.float32)
+
+
+def rim_features(
+    pre_xy: np.ndarray, pos_xy: np.ndarray, is_shooter: np.ndarray
+) -> dict[str, np.ndarray]:
+    """The rim-time half of :data:`RIM_FEATURES`, from two sets of positions.
+
+    Batched over shots: every argument carries a leading shot axis, ``pre_xy`` and
+    ``pos_xy`` are ``(n_shots, 10, 2)`` in the folded frame and ``is_shooter`` is
+    ``(n_shots, 10)``.
+
+    Split out of :func:`shot_features` so that the **movement model's predictions go
+    through the identical arithmetic as the tracking data**. The rim-time features are
+    the movement model's whole reason for existing, and computing them one way when
+    training on real positions and another way when serving predicted ones is the same
+    class of mistake as passing zeros for a velocity. There is now one implementation
+    and both callers use it.
+
+    ``pos_box`` assumes the canonical slot order -- first five rows one team, last five
+    the other -- which :func:`shot_features` establishes and the movement model
+    preserves, since it predicts a displacement per slot.
+    """
+    pre_xy, pos_xy = np.asarray(pre_xy, float), np.asarray(pos_xy, float)
+    if pre_xy.shape != pos_xy.shape or pre_xy.shape[-2:] != (N_PLAYERS, 2):
+        raise ValueError(
+            f"expected matching (n_shots, {N_PLAYERS}, 2), got {pre_xy.shape} and {pos_xy.shape}"
+        )
+
+    pre_dist, pos_dist = rim_distance(pre_xy), rim_distance(pos_xy)
+    pos_angle = rim_angle(pos_xy)
+    shooter_angle = (pos_angle * is_shooter).sum(axis=-1, keepdims=True)
+    move = pos_xy - pre_xy
+
+    return {
+        "pos_x": pos_xy[..., 0],
+        "pos_y": pos_xy[..., 1],
+        "pos_dist": pos_dist,
+        "pos_angle": pos_angle,
+        "pos_cos_shooter": np.cos(pos_angle - shooter_angle),
+        "pos_box": np.stack(
+            [boxgen(scene) for scene in pos_xy.reshape(-1, N_PLAYERS, 2)]
+        ).reshape(pos_dist.shape),
+        "move_dx": move[..., 0],
+        "move_dy": move[..., 1],
+        "move_dist": np.hypot(move[..., 0], move[..., 1]),
+        "closed_on_rim": np.where(pos_dist < pre_dist, 1.0, -1.0),
+    }
 
 
 def _velocity(tracking: GameTracking, index: int, quarter: int) -> np.ndarray:
@@ -163,25 +257,29 @@ def shot_features(tracking: GameTracking, shot: pd.Series) -> pd.DataFrame | Non
     if is_shooter.sum() != 1:
         return None
 
-    pre_dist, pos_dist = rim_distance(pre_xy), rim_distance(pos_xy)
-    pre_angle, pos_angle = rim_angle(pre_xy), rim_angle(pos_xy)
-    shooter_slot = int(np.argmax(is_shooter))
+    # Canonical slots: offence first, then defence, each nearest-to-rim first at
+    # release. Deterministic and reproducible from release-time data alone. The sort
+    # is applied to the arrays rather than to the assembled frame so that the rim-time
+    # columns can come from :func:`rim_features`, which needs the team blocks already
+    # in place -- and which is the same code the movement model's predictions go
+    # through at serving time.
+    order = np.lexsort((rim_distance(pre_xy), -is_offense))
+    pre_xy, pos_xy, velocity = pre_xy[order], pos_xy[order], velocity[order]
+    player_ids, team_ids = player_ids[order], team_ids[order]
+    is_offense, is_shooter = is_offense[order], is_shooter[order]
 
-    move = pos_xy - pre_xy
+    pre_dist, pre_angle = rim_distance(pre_xy), rim_angle(pre_xy)
+    shooter_slot = int(np.argmax(is_shooter))
+    rim_columns = rim_features(pre_xy[None], pos_xy[None], is_shooter[None])
+
     frame = pd.DataFrame(
         {
             "pre_x": pre_xy[:, 0], "pre_y": pre_xy[:, 1],
             "pre_dist": pre_dist, "pre_angle": pre_angle,
             "pre_vx": velocity[:, 0], "pre_vy": velocity[:, 1],
             "pre_speed": np.hypot(velocity[:, 0], velocity[:, 1]),
-            "pos_x": pos_xy[:, 0], "pos_y": pos_xy[:, 1],
-            "pos_dist": pos_dist, "pos_angle": pos_angle,
-            "move_dx": move[:, 0], "move_dy": move[:, 1],
-            "move_dist": np.linalg.norm(move, axis=1),
-            # Signed: positive when the player ended up closer to the rim.
-            "closed_on_rim": np.where(pos_dist < pre_dist, 1.0, -1.0),
+            **{name: values[0] for name, values in rim_columns.items()},
             "pre_cos_shooter": np.cos(pre_angle - pre_angle[shooter_slot]),
-            "pos_cos_shooter": np.cos(pos_angle - pos_angle[shooter_slot]),
             "is_offense": is_offense,
             "is_shooter": is_shooter,
             "role": [tracking.roles.get(str(int(pid)), 3.0) for pid in player_ids],
@@ -189,15 +287,7 @@ def shot_features(tracking: GameTracking, shot: pd.Series) -> pd.DataFrame | Non
             "TeamID": team_ids,
         }
     )
-
-    # Canonical slots: offence first, then defence, each nearest-to-rim first at
-    # release. Deterministic and reproducible from release-time data alone.
-    frame = frame.sort_values(
-        ["is_offense", "pre_dist"], ascending=[False, True], kind="stable"
-    ).reset_index(drop=True)
-
-    frame["pre_box"] = boxgen(frame[["pre_x", "pre_y"]].to_numpy())
-    frame["pos_box"] = boxgen(frame[["pos_x", "pos_y"]].to_numpy())
+    frame["pre_box"] = boxgen(pre_xy)
 
     frame["Slot"] = np.arange(N_PLAYERS)
     frame["ShotID"] = shot["ShotID"]

@@ -68,6 +68,25 @@ from rebounding.data.sportvu import GameTracking
 MIN_FLIGHT_SECONDS = 0.3
 MAX_FLIGHT_SECONDS = 3.0
 
+# The same bound, applied to the moment timestamps instead of the game clock, and it
+# is the one that does the work. The game clock **stops**: on a whistle, a timeout, a
+# review. A release and a rim contact either side of a stoppage can be thirty seconds
+# apart in real time while the clock shows two, so the bound above accepts them and the
+# shot is paired across a dead ball -- the shooter is at the far end of the floor in a
+# previous possession, and the recorded release position is nonsense.
+#
+# Measured over 5,940 paired shots from 90 games before this bound existed: 1.8% had a
+# wall-clock flight over 3 s, and *every* pairing that put the shooter more than 60 ft
+# from the rim was one of them -- 13 shots, median wall flight 36 s, which the
+# play-by-play describes as layups and short jumpers from 1 to 26 ft. Those were the
+# whole of the corpus's implausible long tail.
+#
+# Timestamps are wall-clock milliseconds sampled at 25 Hz and are monotonic within a
+# game, so this is also just the more accurate measurement: for 97.8% of shots the two
+# agree within 0.1 s, and where they disagree the timestamp is the one telling the
+# truth about how long the ball was in the air.
+MAX_WALL_FLIGHT_SECONDS = 3.0
+
 # Rim contact happens at or shortly before the play-by-play records the miss. The
 # clock runs down, so an earlier event has a *larger* clock value.
 RIM_SEARCH_BEFORE_SECONDS = 4.0
@@ -93,6 +112,7 @@ MIN_NEAR_RIM_RISE_FT = 1.0
 DROP_NO_RIM_CONTACT = "no_rim_contact_near_reported_clock"
 DROP_RIM_ALREADY_USED = "rim_contact_already_claimed"
 DROP_NO_RELEASE = "no_release_within_flight_bounds"
+DROP_STOPPED_CLOCK = "release_only_across_a_stopped_clock"
 
 
 @dataclass
@@ -165,6 +185,7 @@ def find_release(
     ball_xyz: np.ndarray,
     rim_distances: np.ndarray,
     shooter_xy: np.ndarray | None = None,
+    drops: Counter | None = None,
 ) -> int | None:
     """Index of the release preceding ``rim_idx``, or ``None`` if none is plausible.
 
@@ -200,7 +221,19 @@ def find_release(
         return None
 
     flight = clocks[before] - rim_clock
-    candidates = before[(flight >= MIN_FLIGHT_SECONDS) & (flight <= MAX_FLIGHT_SECONDS)]
+    within_clock = (flight >= MIN_FLIGHT_SECONDS) & (flight <= MAX_FLIGHT_SECONDS)
+
+    # And the same window on real time, which is what rejects a release on the far
+    # side of a stoppage. See MAX_WALL_FLIGHT_SECONDS.
+    timestamps = moments["Timestamp"].to_numpy()
+    wall = (timestamps[rim_idx] - timestamps[before]) / 1000.0
+    within_wall = (wall >= 0) & (wall <= MAX_WALL_FLIGHT_SECONDS)
+
+    candidates = before[within_clock & within_wall]
+    if drops is not None and candidates.size == 0 and within_clock.any():
+        # Distinguish "the clock says nothing was plausible" from "the only thing the
+        # clock liked was half a minute ago in real time", which is a different fault.
+        drops[DROP_STOPPED_CLOCK] += 1
 
     # Arc test. A layup or dunk releases at shoulder height a few feet from the
     # basket and barely climbs, so the required rise relaxes near the rim -- with
@@ -281,6 +314,7 @@ def pair(
     rim_by_quarter = _quarter_candidates(moments, "IsRimArrival")
     high_by_quarter = _quarter_candidates(moments, "IsHighStart")
     clocks = moments["GameClock"].to_numpy()
+    timestamps = moments["Timestamp"].to_numpy()
     ball_xyz = tracking.ball_xyz
     baskets = moments["Basket"].astype(str).to_numpy()
     rim_distances = moments["RimDistance"].to_numpy()
@@ -320,11 +354,20 @@ def pair(
             if key not in shooter_cache:
                 shooter_cache[key] = shooter_positions(tracking, shooter_id)
 
+            before_stopped = report.drops[DROP_STOPPED_CLOCK]
             release_idx = find_release(
-                moments, high_starts, rim_idx, ball_xyz, rim_distances, shooter_cache[key]
+                moments,
+                high_starts,
+                rim_idx,
+                ball_xyz,
+                rim_distances,
+                shooter_cache[key],
+                drops=report.drops,
             )
             if release_idx is None:
-                report.drops[DROP_NO_RELEASE] += 1
+                # Already counted as a stopped-clock rejection if that is what it was.
+                if report.drops[DROP_STOPPED_CLOCK] == before_stopped:
+                    report.drops[DROP_NO_RELEASE] += 1
                 continue
 
             records.append(
@@ -334,7 +377,13 @@ def pair(
                     "RimIdx": rim_idx,
                     "ReleaseClock": float(clocks[release_idx]),
                     "RimClock": float(clocks[rim_idx]),
-                    "FlightTime": float(clocks[release_idx] - clocks[rim_idx]),
+                    # Wall clock, not game clock: the ball does not stop when the
+                    # clock does. The game-clock interval is still recoverable as
+                    # ReleaseClock - RimClock, which is what makes a disagreement
+                    # between the two visible downstream.
+                    "FlightTime": float(
+                        (timestamps[rim_idx] - timestamps[release_idx]) / 1000.0
+                    ),
                     # Resolved once per shot from the ball at the rim, then applied
                     # to everyone. See rebounding.data.court on why this must not be
                     # a per-player decision.

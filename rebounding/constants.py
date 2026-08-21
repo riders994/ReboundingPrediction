@@ -22,6 +22,15 @@ HOOP = (HALF_COURT_X - RIM_INSET, CENTER_Y)  # (41.75, 25.0)
 
 RIM_HEIGHT = 10.0
 
+# Two players closer than this are effectively occupying one body. Chosen from the
+# corpus rather than from anatomy: at rim time only 0.6% of real pairs are inside it.
+CONTACT_FEET = 2.0
+
+# Sustained speeds above this do not occur in the corpus, so a sample that needs one
+# is a sample of something that cannot happen. Both a scoring threshold and, in
+# `serve.animate`, the bound a drawn scene has to satisfy.
+MAX_SPEED_FPS = 22.0
+
 # The ball is reported as a player row with this team/player id.
 BALL_ID = "-1"
 

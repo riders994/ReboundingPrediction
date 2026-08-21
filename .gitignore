@@ -1,5 +1,11 @@
 # Bulk data and build products. Notebooks are tracked deliberately -- the original
 # `*.ip*` rule is why the 2017 modelling work was never committed and is now lost.
+#
+# `*.pkl` and `*.h5` stay ignored on purpose: model weights reach the web app host by
+# scp, not through git. That is what lost `FinalModel.pkl` in 2017, so the difference
+# now is that the artifact is one command to rebuild (`cli train`) and carries its own
+# provenance -- `cli describe --model FinalModel.pkl` says which commit and which
+# corpus produced the file on the box. Do not "fix" this by committing weights.
 *.csv
 *.json
 *.pkl
@@ -21,3 +27,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# Ported Flask app, staged here to be moved into the ReboundWebApp repo.
+/webapp_port/
