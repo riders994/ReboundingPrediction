@@ -95,8 +95,15 @@ class Player:
         :data:`~rebounding.constants.DEFAULT_POSITION`, as the pipeline does -- the
         original raised ``KeyError`` here and lost the whole game to a blanket except.
 
-        Leaving this unset costs about 1.4 points of top-1, measured on the test split
-        by defaulting every player to 3.0. If the UI can ask for positions, it should.
+        Leaving this unset costs **2.8 points of top-1** on the shipped ``served``
+        artifact -- 29.7% with real positions, 26.9% with every player defaulted to
+        3.0, measured on the test split (n=5,756). An earlier note here said 1.4
+        points; that was measured against a different fit and understates it.
+
+        A UI that cannot ask for positions should **not** serve this default. Dropping
+        ``role`` and retraining scores 27.6% -- better than 26.9% on every metric, and
+        the README's "remove and retrain, never default" rule exists for exactly this
+        case. Defaulting is the worst of the three options, not the cheap one.
         """
         if self.position is None:
             return DEFAULT_POSITION
